@@ -7,7 +7,7 @@
  * Engines: claude (first-party) · grok (jaula Seatbelt) · api (loop próprio via chat-api).
  *
  * Credenciais (BYOK), em ordem: ~/.xneog/config.json → env (XNEOG_BRIDGE/NATIVE_API_KEY)
- * → legado (~/Projects/xneog-tg-poc/.env, p/ o Mac matriz seguir funcionando sem login).
+ * → ~/.xneog/env (arquivo de env compartilhado do host, p/ operar sem login).
  * `xneog login` grava a config (0600); `--keychain` guarda a key no Keychain do macOS.
  *
  * Perfis de permissão (client-side → permissionMode do daemon):
@@ -24,7 +24,7 @@ import { execFileSync } from "node:child_process";
 const HOME = homedir();
 const CFG_DIR = `${HOME}/.xneog`;
 const CFG_FILE = `${CFG_DIR}/config.json`;
-const VERSION = "0.6.2";
+const VERSION = "0.6.3";
 
 const C = { dim: "\x1b[2m", reset: "\x1b[0m", cyan: "\x1b[36m", green: "\x1b[32m", yellow: "\x1b[33m", red: "\x1b[31m", bold: "\x1b[1m" };
 
@@ -44,7 +44,7 @@ function loadConfig() {
     try { cfg.key = execFileSync("security", ["find-generic-password", "-a", "xneog", "-s", "xneog-cli", "-w"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim(); }
     catch { cfg.key = ""; }
   }
-  const legacy = loadEnvFile(`${HOME}/Projects/xneog-tg-poc/.env`);
+  const legacy = loadEnvFile(`${CFG_DIR}/env`);
   return {
     base: process.env.XNEOG_BRIDGE || cfg.base || "http://127.0.0.1:8802",
     key: process.env.NATIVE_API_KEY || cfg.key || legacy.NATIVE_API_KEY || "",
@@ -53,7 +53,16 @@ function loadConfig() {
 const CFG = loadConfig();
 const H = { Authorization: `Bearer ${CFG.key}`, "Content-Type": "application/json" };
 const api = async (path, opts = {}) => {
-  const r = await fetch(`${CFG.base}${path}`, { headers: H, ...opts });
+  let r;
+  try { r = await fetch(`${CFG.base}${path}`, { headers: H, ...opts }); }
+  catch {
+    console.error(`${C.red}daemon não encontrado em ${CFG.base}${C.reset} — está rodando? suba com ${C.bold}xneog-agentd run${C.reset} (ou confira a URL: xneog login)`);
+    process.exit(1);
+  }
+  if (r.status === 401 || r.status === 403) {
+    console.error(`${C.red}credencial recusada pelo daemon (HTTP ${r.status})${C.reset} — a key mudou ou foi revogada. rode: ${C.bold}xneog login${C.reset}`);
+    process.exit(1);
+  }
   const t = await r.text();
   let j = null; try { j = JSON.parse(t); } catch {}
   return { status: r.status, json: j, text: t };
@@ -136,9 +145,9 @@ async function cmdImport(cs) {
   if (r.status !== 200) return console.error(`${C.red}${r.text}${C.reset}`);
   console.log(`${C.green}importada:${C.reset} ${r.json.id} · "${r.json.title}" · ${r.json.events} eventos · reviveável`);
 }
-const PROFILES = { safe: "default", edit: "acceptEdits" };
+const PROFILES = { safe: "default", edit: "acceptEdits", auto: "auto" };
 async function cmdNew(cwd, { title, engine, model, profile }) {
-  if (profile && !PROFILES[profile]) return console.error(`${C.red}perfil inválido${C.reset} — use safe|edit (full não existe: a fila de aprovação é a doutrina)`);
+  if (profile && !PROFILES[profile]) return console.error(`${C.red}perfil inválido${C.reset} — use safe|edit|auto (auto = daemon aprova tudo sozinho, com auditoria)`);
   const body = { cwd: cwd || process.cwd(), title: title || "" };
   if (engine) body.engine = engine;
   if (model) body.model = model;
@@ -225,7 +234,8 @@ function banner(S) {
   const modelo = S.model || "padrão";
   const modo = S.permissionMode === "acceptEdits" ? "aceitar edições"
              : S.permissionMode === "plan" ? "modo do plano"
-             : S.permissionMode === "jail" ? "jaula" : "aprovação";
+             : S.permissionMode === "jail" ? "jaula"
+             : S.permissionMode === "auto" ? `${C.yellow}AUTO-APROVA${C.reset}${C.dim}` : "aprovação";
   console.log("");
   console.log(` ${C.cyan}▚▞${C.reset}  ${C.bold}xneog${C.reset} v${VERSION} ${C.dim}·${C.reset} ${engC}${engine}${C.reset} ${C.dim}— ${modelo} · ${modo}${C.reset}`);
   console.log(` ${C.cyan}▞▚${C.reset}  ${C.dim}${cwd} · sessão ${S.id}${(S.aiTitle || S.title) ? ` “${(S.aiTitle || S.title).slice(0, 46)}”` : ""}${C.reset}`);
@@ -259,6 +269,7 @@ async function cmdAttach(id) {
       try {
         const res = await fetch(`${CFG.base}/sessions/${id}/stream?from=${from}&client=terminal`, { headers: { Authorization: H.Authorization } });
         if (res.status === 404) { console.log(`\n${C.red}sessão ${id} não existe mais${C.reset}`); process.exit(0); }
+        if (res.status === 401 || res.status === 403) { console.log(`\n${C.red}credencial recusada no stream (HTTP ${res.status})${C.reset} — rode: xneog login`); process.exit(1); }
         if (!res.ok || !res.body) throw new Error(`stream ${res.status}`);
         backoff = 1000;
         let buf = "";
