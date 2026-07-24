@@ -24,7 +24,7 @@ import { execFileSync } from "node:child_process";
 const HOME = homedir();
 const CFG_DIR = `${HOME}/.xneog`;
 const CFG_FILE = `${CFG_DIR}/config.json`;
-const VERSION = "0.6.3";
+const VERSION = "0.6.4";
 
 const C = { dim: "\x1b[2m", reset: "\x1b[0m", cyan: "\x1b[36m", green: "\x1b[32m", yellow: "\x1b[33m", red: "\x1b[31m", bold: "\x1b[1m" };
 
@@ -417,6 +417,7 @@ ${C.cyan}uso:${C.reset}
   xneog attach <id>                       entra numa sessão (streaming + composer + aprovação)
   xneog import <claudeSessionId>          importa sessão do Claude Code CLI (reviveável)
   xneog models                            engines/modelos do registry (engines.json)
+  xneog pair [nome]                       código p/ parear um device (app iOS) neste daemon
   xneog meta                              identidade e capabilities do daemon
 
 ${C.cyan}perfis:${C.reset} safe = tudo pede aprovação · edit = edições entram sozinhas (Bash pede)

@@ -22,6 +22,10 @@ assumir sem ler o daemon.
 - HTTP/1.1 em `127.0.0.1:8802` (bind local; o device chega via proxy `/code/*` do BFF).
 - Auth: `Authorization: Bearer <NATIVE_API_KEY>` OU token por-device
   `v2.<deviceId>.<expiry>.<hmac>` (TTL 10min, emitido pelo BFF — só p/ `/code/*`).
+- Pairing (capability `pair`): `xneog pair` → `POST /pair/start` (master key) gera código
+  single-use de 5min; o device troca via `POST /pair/claim` (sem auth — o código é a
+  credencial) por `{ deviceId, secret }` e passa a cunhar tokens v2 localmente
+  (`hmac = HMAC-SHA256(secret, "deviceId.expiry")`). 10 claims errados → pendências limpas.
 - Respostas JSON `{...}` ou erro `{ "error": "..." }` com status HTTP correspondente.
 - SSE: `text/event-stream`, frames `data: {...}\n\n`, heartbeat `: hb` a cada 15s.
 
@@ -31,7 +35,7 @@ Sessão = processo dirigível no Mac. Duas classes (`engine`):
 
 | engine   | processo                                     | modos | aprovação | resume |
 |----------|----------------------------------------------|-------|-----------|--------|
-| `claude` | `claude -p` stream-json persistente (1/sessão) | default/acceptEdits/plan | fila do daemon | `--resume <claudeSession>` |
+| `claude` | `claude -p` stream-json persistente (1/sessão) | default/acceptEdits/plan/**auto** | fila do daemon | `--resume <claudeSession>` |
 | `grok`   | 1 spawn POR TURNO sob Seatbelt (`grok-jail.sb`), cwd presa em `~/GrokWork/<id>` | NÃO (400) — a jaula é a parede | `--always-approve` | `-r <grokSession>` |
 | `api`    | NENHUM — loop agentic do próprio daemon (F4): Messages API via chat-api, ≤20 iterações/turno | default/acceptEdits (plan → 400) | mesma fila do daemon (Bash/Write) | `transcripts/<id>.messages.json` |
 
@@ -70,8 +74,9 @@ antigos; `i` segue crescendo).
 
 | kind | payload extra | emitido quando |
 |------|---------------|----------------|
-| `user` | `text, images?` | turno do usuário entrou |
+| `user` | `text, images?, via?` | turno do usuário entrou (`via`: "terminal"\|"app" — cliente de origem) |
 | `delta` | `text` | streaming do modelo — **EFÊMERO**: só ao vivo, fora do buffer/replay |
+| `presence` | `terminal, app` | **EFÊMERO** — quem está com o stream aberto (muda ao entrar/sair) |
 | `text` | `text` | bloco de texto consolidado (fim do bloco) |
 | `thinking` | `text` | raciocínio (cliente mostra opt-in) |
 | `tool_use` | `toolId, tool, input` | modelo chamou tool (grok: `tool` = `grok:<type>`) |
@@ -96,8 +101,10 @@ deltas (o `text` consolidado cobre).
 
 ## 5. Streams SSE
 
-- **Sessão**: `GET /sessions/:id/stream?from=N` — replay + ao vivo, heartbeat 15s,
-  teto 8 assinantes/sessão (429 acima).
+- **Sessão**: `GET /sessions/:id/stream?from=N&client=terminal|app` — replay + ao vivo,
+  heartbeat 15s, teto 8 assinantes/sessão (429 acima). `client` identifica o assinante
+  para presença (lista expõe `clients: {terminal, app}`; mudanças viram evento `presence`).
+  `POST /sessions/:id/message` aceita `via` com o mesmo vocabulário.
 - **Lista**: `GET /events` — 1º frame `{hello:true}`; depois avisos de mudança da lista
   (sessão criada/morta/aprovação pendente…) → cliente refaz `GET /sessions`. Teto de
   assinantes global; o app usa 1.
@@ -115,7 +122,10 @@ deltas (o `text` consolidado cobre).
 3. Lote: `POST /sessions/:id/permission/bulk` `{ approve, always }` — resolve pendentes
    de escrita e semeia a família (Edit/Write/MultiEdit…).
 4. Sem resposta em 120s = negado. `session_end` nega tudo pendente.
-5. `bypassPermissions` NÃO existe de propósito.
+5. `bypassPermissions` do CLI NÃO é exposto. O modo **`auto`** (opt-in POR SESSÃO, 24-jul)
+   é diferente: a fila continua no daemon, que aprova na hora COM trilha de auditoria
+   (`by:"auto"` no audit.jsonl) — revogável a quente via `POST /mode`. Engines claude e api;
+   grok segue sem modos (jaula).
 
 ## 7. Fila de turnos
 
@@ -207,6 +217,8 @@ POST /sessions/cli/:pid/interrupt       SIGINT no processo do CLI
 POST /sessions/cli/:pid/adopt           adota sessão do CLI (vira dirigível)
 POST /sessions/cli/:pid/inject          injeta texto no tty (gate: pid+start-time)
 POST /internal/approval                 (interno) MCP de aprovação → daemon
+POST /pair/start                        { name? } → { code, deviceId, expiresInSec } (só master key)
+POST /pair/claim                        SEM auth: { code, name? } → { deviceId, secret, tokenFormat, maxTtlMs }
 ```
 
 ## 12. Regras de compatibilidade para clientes
