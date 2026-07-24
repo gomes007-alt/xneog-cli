@@ -24,7 +24,7 @@ import { execFileSync } from "node:child_process";
 const HOME = homedir();
 const CFG_DIR = `${HOME}/.xneog`;
 const CFG_FILE = `${CFG_DIR}/config.json`;
-const VERSION = "0.6.0";
+const VERSION = "0.6.1";
 
 const C = { dim: "\x1b[2m", reset: "\x1b[0m", cyan: "\x1b[36m", green: "\x1b[32m", yellow: "\x1b[33m", red: "\x1b[31m", bold: "\x1b[1m" };
 
@@ -168,7 +168,7 @@ function renderDiff(inputStr) {
 let STATUS = "";   // "engine · modelo" — rodapé direito do turn_end (setado no banner)
 function render(e) {
   switch (e.kind) {
-    case "user":  process.stdout.write(`\n${C.cyan}❯ ${e.text}${C.reset}\n`); break;
+    case "user":  process.stdout.write(`\n${C.cyan}❯ ${e.text}${C.reset}${e.via === "app" ? ` ${C.dim}(do app)${C.reset}` : ""}\n`); break;
     case "delta": process.stdout.write(e.text || ""); break;
     case "text":  break;   // o delta já imprimiu (engines turn-based mandam text sem delta: imprime)
     case "tool_use": {
@@ -206,6 +206,9 @@ function render(e) {
       process.stdout.write(`\n${C.dim}${left}${" ".repeat(pad)}${STATUS}${C.reset}\n${e.next ? "" : `${C.cyan}❯ ${C.reset}`}`);
       break;
     }
+    case "presence":
+      if (typeof e.app === "number") process.stdout.write(`\n${C.dim}▪ app ${e.app > 0 ? "acompanhando ao vivo" : "saiu"} · ${e.app} app / ${e.terminal} terminal${C.reset}\n`);
+      break;
     case "session_end": process.stdout.write(`\n${C.red}sessão encerrada${C.reset}\n`); break;
     case "mode_changed":  process.stdout.write(`\n${C.dim}modo → ${e.mode}${C.reset}\n`); break;
     case "model_changed": process.stdout.write(`\n${C.dim}modelo → ${e.model || "padrão"}${C.reset}\n`); break;
@@ -254,7 +257,7 @@ async function cmdAttach(id) {
   (async function stream() {
     for (;;) {
       try {
-        const res = await fetch(`${CFG.base}/sessions/${id}/stream?from=${from}`, { headers: { Authorization: H.Authorization } });
+        const res = await fetch(`${CFG.base}/sessions/${id}/stream?from=${from}&client=terminal`, { headers: { Authorization: H.Authorization } });
         if (res.status === 404) { console.log(`\n${C.red}sessão ${id} não existe mais${C.reset}`); process.exit(0); }
         if (!res.ok || !res.body) throw new Error(`stream ${res.status}`);
         backoff = 1000;
@@ -303,7 +306,7 @@ async function cmdAttach(id) {
   rl.prompt();
   const PROMPT = `${C.cyan}❯ ${C.reset}`, PROMPT_ML = `${C.dim}… ${C.reset}`;
   const send = async (text) => {
-    const r = await api(`/sessions/${id}/message`, { method: "POST", body: JSON.stringify({ text }) });
+    const r = await api(`/sessions/${id}/message`, { method: "POST", body: JSON.stringify({ text, via: "terminal" }) });
     if (r.status !== 200) console.error(`${C.red}falhou: ${r.text}${C.reset}`);
   };
   let ml = null;   // { mode: "fence"|"bslash", lines: [] }
