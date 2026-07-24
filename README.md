@@ -53,8 +53,10 @@ subagents & workflows with per-phase progress · `/q` detaches (session keeps li
 
 - **safe** (default) — every side effect asks for approval
 - **edit** — file edits go through, shell commands still ask
-- **full** — *does not exist, on purpose.* The approval queue is enforced server-side;
-  there is no bypass flag to leak.
+- **auto** — the daemon approves everything itself, **per session**, with a full audit
+  trail (`by:"auto"`); revocable live with `/mode default`
+- a global bypass flag still *does not exist, on purpose* — the queue always runs
+  server-side, even in auto.
 
 ## Architecture
 
