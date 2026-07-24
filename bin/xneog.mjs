@@ -24,7 +24,7 @@ import { execFileSync } from "node:child_process";
 const HOME = homedir();
 const CFG_DIR = `${HOME}/.xneog`;
 const CFG_FILE = `${CFG_DIR}/config.json`;
-const VERSION = "0.5.1";
+const VERSION = "0.6.0";
 
 const C = { dim: "\x1b[2m", reset: "\x1b[0m", cyan: "\x1b[36m", green: "\x1b[32m", yellow: "\x1b[33m", red: "\x1b[31m", bold: "\x1b[1m" };
 
@@ -165,6 +165,7 @@ function renderDiff(inputStr) {
   }
   return any;
 }
+let STATUS = "";   // "engine · modelo" — rodapé direito do turn_end (setado no banner)
 function render(e) {
   switch (e.kind) {
     case "user":  process.stdout.write(`\n${C.cyan}❯ ${e.text}${C.reset}\n`); break;
@@ -187,10 +188,10 @@ function render(e) {
       break;
     }
     case "bulk_resolved":
-      process.stdout.write(`\n${C.green}lote: ${e.resolved} ${e.approve ? "aprovada(s)" : "negada(s)"}${e.always ? " · edições liberadas nesta sessão" : ""}${C.reset}\n${C.cyan}› ${C.reset}`);
+      process.stdout.write(`\n${C.green}lote: ${e.resolved} ${e.approve ? "aprovada(s)" : "negada(s)"}${e.always ? " · edições liberadas nesta sessão" : ""}${C.reset}\n${C.cyan}❯ ${C.reset}`);
       break;
     case "queued":
-      process.stdout.write(`\n${C.dim}⏳ na fila (${e.depth}): ${String(e.text || "").slice(0, 60)}${C.reset}\n${C.cyan}› ${C.reset}`);
+      process.stdout.write(`\n${C.dim}⏳ na fila (${e.depth}): ${String(e.text || "").slice(0, 60)}${C.reset}\n${C.cyan}❯ ${C.reset}`);
       break;
     case "queue_cleared":
       process.stdout.write(`\n${C.dim}fila descartada (${e.dropped}) · ${e.reason}${C.reset}\n`);
@@ -200,7 +201,9 @@ function render(e) {
       break;
     case "turn_end": {
       const rest = e.next ? ` · próxima da fila entrando${e.queued ? ` (${e.queued} atrás)` : ""}` : "";
-      process.stdout.write(`\n${C.dim}— turno concluído${e.durationMs ? ` em ${Math.round(e.durationMs / 1000)}s` : ""}${rest}${C.reset}\n${e.next ? "" : `${C.cyan}› ${C.reset}`}`);
+      const left = `— turno concluído${e.durationMs ? ` em ${Math.round(e.durationMs / 1000)}s` : ""}${rest}`;
+      const pad = Math.max(1, cols() - left.length - STATUS.length - 1);
+      process.stdout.write(`\n${C.dim}${left}${" ".repeat(pad)}${STATUS}${C.reset}\n${e.next ? "" : `${C.cyan}❯ ${C.reset}`}`);
       break;
     }
     case "session_end": process.stdout.write(`\n${C.red}sessão encerrada${C.reset}\n`); break;
@@ -208,16 +211,40 @@ function render(e) {
     case "model_changed": process.stdout.write(`\n${C.dim}modelo → ${e.model || "padrão"}${C.reset}\n`); break;
   }
 }
+// ── boot banner (padrão dos CLIs de referência: logo compacta + ficha + avisos acionáveis) ──
+const cols = () => Math.min(process.stdout.columns || 80, 100);
+const hr = () => console.log(`${C.dim}${"─".repeat(cols())}${C.reset}`);
+function banner(S) {
+  const home = process.env.HOME || "";
+  const cwd = S.cwd.startsWith(home) ? "~" + S.cwd.slice(home.length) : S.cwd;
+  const engine = S.engine || "claude";
+  const engC = engine === "grok" ? C.yellow : engine === "api" ? C.cyan : C.green;
+  const modelo = S.model || "padrão";
+  const modo = S.permissionMode === "acceptEdits" ? "aceitar edições"
+             : S.permissionMode === "plan" ? "modo do plano"
+             : S.permissionMode === "jail" ? "jaula" : "aprovação";
+  console.log("");
+  console.log(` ${C.cyan}▚▞${C.reset}  ${C.bold}xneog${C.reset} v${VERSION} ${C.dim}·${C.reset} ${engC}${engine}${C.reset} ${C.dim}— ${modelo} · ${modo}${C.reset}`);
+  console.log(` ${C.cyan}▞▚${C.reset}  ${C.dim}${cwd} · sessão ${S.id}${(S.aiTitle || S.title) ? ` “${(S.aiTitle || S.title).slice(0, 46)}”` : ""}${C.reset}`);
+  console.log("");
+  if (S.needsInput > 0)
+    console.log(` ${C.yellow}⚠ aprovação pendente nesta sessão — responda y/n/a/e${C.reset}`);
+  if (!S.connected && engine === "claude")
+    console.log(` ${C.yellow}⚠ sessão sem processo — reanime pelo app (revive) ou crie outra: xneog new${C.reset}`);
+  if (S.queued > 0)
+    console.log(` ${C.dim}⏳ ${S.queued} mensagem(ns) na fila${C.reset}`);
+  console.log(` ${C.dim}▎ "/" menu · """ multiline · y/n/a/e aprovação · /q sai — a sessão continua (o app iOS vê a mesma)${C.reset}`);
+  hr();
+  STATUS = `${engine}${S.model ? ` · ${S.model}` : ""}`;
+}
+
 // ── attach: streaming + composer ─────────────────────────────────────────────
 async function cmdAttach(id) {
   const chk = await api(`/sessions`);
   const S = (chk.json?.sessions || []).find(s => s.id === id || s.id.startsWith(id));
   if (!S) return console.error(`sessão ${id} não existe`);
   id = S.id;
-  if (!S.connected) console.log(`${C.yellow}sessão morta — reanime no app ou mande mensagem (engines turn-based reanimam sós)${C.reset}`);
-
-  console.log(`${C.bold}${S.aiTitle || S.title}${C.reset} ${C.dim}${S.cwd}${S.engine && S.engine !== "claude" ? ` · ${S.engine}` : ""}${C.reset}`);
-  console.log(`${C.dim}streaming ao vivo · o app iOS vê o mesmo · /q pra sair${C.reset}\n`);
+  banner(S);
 
   let pendingReq = null;
   let sawDelta = false;
@@ -271,10 +298,10 @@ async function cmdAttach(id) {
     for (const m of cmdMenu.filter(x => x.scope === "both")) process.stdout.write(`${C.cyan}${m.cmd.padEnd(9)}${C.reset} ${C.dim}${m.desc} (vai como mensagem)${C.reset}\n`);
   }
 
-  const rl = createInterface({ input: process.stdin, output: process.stdout, prompt: `${C.cyan}› ${C.reset}` });
+  const rl = createInterface({ input: process.stdin, output: process.stdout, prompt: `${C.cyan}❯ ${C.reset}` });
   rl.on("close", () => process.exit(0));
   rl.prompt();
-  const PROMPT = `${C.cyan}› ${C.reset}`, PROMPT_ML = `${C.dim}… ${C.reset}`;
+  const PROMPT = `${C.cyan}❯ ${C.reset}`, PROMPT_ML = `${C.dim}… ${C.reset}`;
   const send = async (text) => {
     const r = await api(`/sessions/${id}/message`, { method: "POST", body: JSON.stringify({ text }) });
     if (r.status !== 200) console.error(`${C.red}falhou: ${r.text}${C.reset}`);
