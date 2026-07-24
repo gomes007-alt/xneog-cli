@@ -24,7 +24,7 @@ import { execFileSync } from "node:child_process";
 const HOME = homedir();
 const CFG_DIR = `${HOME}/.xneog`;
 const CFG_FILE = `${CFG_DIR}/config.json`;
-const VERSION = "0.6.1";
+const VERSION = "0.6.2";
 
 const C = { dim: "\x1b[2m", reset: "\x1b[0m", cyan: "\x1b[36m", green: "\x1b[32m", yellow: "\x1b[33m", red: "\x1b[31m", bold: "\x1b[1m" };
 
@@ -233,7 +233,7 @@ function banner(S) {
   if (S.needsInput > 0)
     console.log(` ${C.yellow}⚠ aprovação pendente nesta sessão — responda y/n/a/e${C.reset}`);
   if (!S.connected && engine === "claude")
-    console.log(` ${C.yellow}⚠ sessão sem processo — reanime pelo app (revive) ou crie outra: xneog new${C.reset}`);
+    console.log(` ${C.dim}▪ sessão adormecida — renasce sozinha (com histórico) na próxima mensagem${C.reset}`);
   if (S.queued > 0)
     console.log(` ${C.dim}⏳ ${S.queued} mensagem(ns) na fila${C.reset}`);
   console.log(` ${C.dim}▎ "/" menu · """ multiline · y/n/a/e aprovação · /q sai — a sessão continua (o app iOS vê a mesma)${C.reset}`);
