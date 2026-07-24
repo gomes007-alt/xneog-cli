@@ -301,7 +301,7 @@ async function cmdAttach(id) {
   api("/commands").then(r => { cmdMenu = r.json?.menu || []; }).catch(() => {});
   const LOCAL = [
     { cmd: "/model", desc: "troca o modelo (sonnet|opus|fable|haiku ou claude-*)" },
-    { cmd: "/mode",  desc: "troca o modo (default|acceptEdits|plan)" },
+    { cmd: "/mode",  desc: "troca o modo (default|acceptEdits|plan|auto)" },
     { cmd: "/stop",  desc: "cancela o turno atual (a sessão sobrevive)" },
     { cmd: "/tasks", desc: "subagentes/workflows da sessão (com fases)" },
     { cmd: '"""',    desc: "abre bloco multiline (fecha com \"\"\" e envia) · ou termine a linha com \\" },
@@ -358,7 +358,7 @@ async function cmdAttach(id) {
     }
     if (t.startsWith("/mode")) {
       const m = t.split(/\s+/)[1] || "";
-      if (!m) { process.stdout.write(`${C.dim}uso: /mode default|acceptEdits|plan${C.reset}\n`); return rl.prompt(); }
+      if (!m) { process.stdout.write(`${C.dim}uso: /mode default|acceptEdits|plan|auto${C.reset}\n`); return rl.prompt(); }
       const r = await api(`/sessions/${id}/mode`, { method: "POST", body: JSON.stringify({ mode: m }) });
       if (r.status !== 200) console.error(`${C.red}${r.text}${C.reset}`);
       return rl.prompt();
@@ -425,6 +425,22 @@ ${C.dim}"full" não existe: bypass de aprovação não é exposto pelo daemon �
 ${C.cyan}no attach:${C.reset} "/" menu · /model /mode /stop /tasks · """ multiline · y/n/a/e aprovação · /q sai`);
 }
 
+// ── pair: gera código de uso único p/ registrar um device (app iOS) no daemon ─
+async function cmdPair(name) {
+  const meta = await api("/meta");
+  if (!(meta.json?.capabilities || []).includes("pair"))
+    return console.error(`${C.red}este daemon não suporta pairing${C.reset} — atualize o xneog-agentd`);
+  const r = await api("/pair/start", { method: "POST", body: JSON.stringify({ name }) });
+  if (r.status !== 200) return console.error(`${C.red}${r.text}${C.reset}`);
+  const { code, deviceId, expiresInSec } = r.json;
+  const pretty = code.replace(/(.{5})/g, "$1 ").trim();
+  console.log(`\n${C.bold}código de pareamento:${C.reset}\n`);
+  console.log(`   ${C.cyan}${C.bold}${pretty}${C.reset}\n`);
+  console.log(`${C.dim}no app xNeog: Ajustes → Parear Mac → digite o código.`);
+  console.log(`válido por ${Math.round(expiresInSec / 60)}min · uso único · device ${deviceId}`);
+  console.log(`daemon: ${CFG.base} (o app precisa alcançar esta URL)${C.reset}`);
+}
+
 const argv = process.argv.slice(2);
 const [cmd] = argv;
 function flag(name) { const i = argv.indexOf(name); return i >= 0 ? (argv.splice(i, 2)[1] || "") : ""; }
@@ -436,6 +452,7 @@ const profile = flag("--profile");
 const base = flag("--base");
 const keyFlag = flag("--key");
 const keychain = boolFlag("--keychain");
+const nameFlag = flag("--name");
 const args = argv.slice(1);
 
 // `xneog` puro num TTY = experiência Claude Code: reusa a sessão viva mais recente DESTE
@@ -460,6 +477,7 @@ else if (cmd === "new") { needKey(); await cmdNew(args[0], { title, engine, mode
 else if (cmd === "attach" && args[0]) { needKey(); await cmdAttach(args[0]); }
 else if (cmd === "import" && args[0]) { needKey(); await cmdImport(args[0]); }
 else if (cmd === "models") { needKey(); await cmdModels(); }
+else if (cmd === "pair") { needKey(); await cmdPair(nameFlag || args[0] || ""); }
 else if (cmd === "meta") { needKey(); await cmdMeta(); }
 else if (cmd === "--version" || cmd === "-v") console.log(VERSION);
 else if (cmd === "help" || cmd === "-h" || cmd === "--help") help();
