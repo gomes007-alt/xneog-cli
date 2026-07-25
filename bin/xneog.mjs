@@ -12,7 +12,8 @@
  *
  * Perfis de permissão (client-side → permissionMode do daemon):
  *   safe = default (toda ação com efeito colateral pede aprovação)
- *   edit = acceptEdits (edições entram sozinhas; Bash ainda pede)
+ *   edit = acceptEdits (edições e Bash de LEITURA entram sozinhos; escrita/rede/destrutivo pede)
+ *   auto = o daemon aprova tudo, por sessão, com trilha de auditoria (revogável a quente)
  *   "full" NÃO existe de propósito: bypassPermissions não é exposto pelo daemon — a fila
  *   de aprovação é a razão da ponte existir (doutrina, enforce server-side).
  */
@@ -24,7 +25,7 @@ import { execFileSync } from "node:child_process";
 const HOME = homedir();
 const CFG_DIR = `${HOME}/.xneog`;
 const CFG_FILE = `${CFG_DIR}/config.json`;
-const VERSION = "0.6.4";
+const VERSION = "0.7.0";
 
 const C = { dim: "\x1b[2m", reset: "\x1b[0m", cyan: "\x1b[36m", green: "\x1b[32m", yellow: "\x1b[33m", red: "\x1b[31m", bold: "\x1b[1m" };
 
@@ -50,12 +51,18 @@ function loadConfig() {
     key: process.env.NATIVE_API_KEY || cfg.key || legacy.NATIVE_API_KEY || "",
   };
 }
+// `xneog ls | head -1` fechava o pipe e o Node cuspia stack trace de EPIPE na cara do usuário
+process.stdout.on("error", (e) => { if (e && e.code === "EPIPE") process.exit(0); });
+
 const CFG = loadConfig();
 const H = { Authorization: `Bearer ${CFG.key}`, "Content-Type": "application/json" };
-const api = async (path, opts = {}) => {
+const api = async (path, opts = {}, soft = false) => {
   let r;
-  try { r = await fetch(`${CFG.base}${path}`, { headers: H, ...opts }); }
+  // timeout: daemon travado (aceita conexão e não responde) pendurava o comando pra sempre
+  try { r = await fetch(`${CFG.base}${path}`, { headers: H, signal: AbortSignal.timeout(20000), ...opts }); }
   catch {
+    // dentro do attach o stream reconecta sozinho — derrubar o processo perderia o composer e o draft
+    if (soft) return { status: 0, json: null, text: "offline" };
     console.error(`${C.red}daemon não encontrado em ${CFG.base}${C.reset} — está rodando? suba com ${C.bold}xneog-agentd run${C.reset} (ou confira a URL: xneog login)`);
     process.exit(1);
   }
@@ -177,7 +184,12 @@ function renderDiff(inputStr) {
 let STATUS = "";   // "engine · modelo" — rodapé direito do turn_end (setado no banner)
 function render(e) {
   switch (e.kind) {
-    case "user":  process.stdout.write(`\n${C.cyan}❯ ${e.text}${C.reset}${e.via === "app" ? ` ${C.dim}(do app)${C.reset}` : ""}\n`); break;
+    // o readline JÁ ecoou o que você digitou aqui — reimprimir dava tudo em dobro. Do app/outro
+    // cliente, imprime (é a única forma de ver o que foi mandado de fora).
+    case "user":
+      if (e.via === "terminal") break;
+      process.stdout.write(`\n${C.cyan}❯ ${e.text}${C.reset} ${C.dim}(${e.via === "app" ? "do app" : "de outro cliente"})${C.reset}\n`);
+      break;
     case "delta": process.stdout.write(e.text || ""); break;
     case "text":  break;   // o delta já imprimiu (engines turn-based mandam text sem delta: imprime)
     case "tool_use": {
@@ -190,10 +202,19 @@ function render(e) {
       break;
     case "permission_request": {
       const edicao = ["Edit", "MultiEdit", "Write", "NotebookEdit"].includes(e.tool);
+      // "sempre" NÃO existe para Bash & cia (NEVER_ALWAYS no daemon) — oferecer [a] era promessa falsa
+      const semAlways = ["Bash", "KillShell", "KillBash", "BashOutput"].includes(e.tool);
       const extra = edicao ? `  ${C.cyan}[e] aceitar edições (lote)${C.reset}` : "";
-      process.stdout.write(`\n${C.yellow}⌘ APROVAR ${e.tool}${C.reset}\n`);
-      if (!(edicao && renderDiff(e.input))) process.stdout.write(`${C.dim}${(e.input || "").slice(0, 300)}${C.reset}\n`);
-      process.stdout.write(`${C.yellow}[y] sim  [n] não  [a] sempre nesta sessão${C.reset}${extra}\n`);
+      process.stdout.write(`\x07\n${C.yellow}⌘ APROVAR ${e.tool}${C.reset}\n`);   // bell: você pode estar em outra aba
+      if (!(edicao && renderDiff(e.input))) {
+        // comando INTEIRO (truncar sem avisar = aprovar o que você não viu)
+        let txt = e.input || "";
+        try { const o = JSON.parse(txt); if (o.command) txt = o.command; } catch {}
+        const cap = 1200;
+        process.stdout.write(`${C.dim}${txt.slice(0, cap)}${txt.length > cap ? ` ⋯ +${txt.length - cap} chars` : ""}${C.reset}\n`);
+      }
+      process.stdout.write(`${C.yellow}[y] sim  [n] não${semAlways ? "" : "  [a] sempre nesta sessão"}${C.reset}${extra}`);
+      process.stdout.write(` ${C.dim}· ou aprove no iPhone (push enviado) · sem resposta em 120s = negado${C.reset}\n`);
       break;
     }
     case "bulk_resolved":
@@ -232,7 +253,7 @@ function banner(S) {
   const engine = S.engine || "claude";
   const engC = engine === "grok" ? C.yellow : engine === "api" ? C.cyan : C.green;
   const modelo = S.model || "padrão";
-  const modo = S.permissionMode === "acceptEdits" ? "aceitar edições"
+  const modo = S.permissionMode === "acceptEdits" ? "edições + leitura"
              : S.permissionMode === "plan" ? "modo do plano"
              : S.permissionMode === "jail" ? "jaula"
              : S.permissionMode === "auto" ? `${C.yellow}AUTO-APROVA${C.reset}${C.dim}` : "aprovação";
@@ -259,19 +280,27 @@ async function cmdAttach(id) {
   id = S.id;
   banner(S);
 
-  let pendingReq = null;
+  // FILA de aprovações, não uma só: o modelo dispara tools em paralelo e o app pode resolver uma
+  // enquanto outra segue pendente. Com uma variável única, o "y" caía na aprovação errada — ou virava
+  // MENSAGEM pro modelo depois que o app resolveu a única que o terminal conhecia.
+  const pending = [];
   let sawDelta = false;
 
-  let from = Math.max(0, (S.count || 0) - 40);
+  // cursor = `seq` da sessão (id monotônico do daemon). `count` é só o tamanho do buffer e NUNCA é
+  // comparável com `i` — deltas consomem seq sem entrar no buffer; usar count despejava a sessão inteira.
+  let from = Math.max(0, (S.seq || 0) - 40);
   let backoff = 1000;
+  let live = false;   // fronteira histórico↔ao vivo (o replay do daemon vem antes)
   (async function stream() {
     for (;;) {
       try {
         const res = await fetch(`${CFG.base}/sessions/${id}/stream?from=${from}&client=terminal`, { headers: { Authorization: H.Authorization } });
         if (res.status === 404) { console.log(`\n${C.red}sessão ${id} não existe mais${C.reset}`); process.exit(0); }
         if (res.status === 401 || res.status === 403) { console.log(`\n${C.red}credencial recusada no stream (HTTP ${res.status})${C.reset} — rode: xneog login`); process.exit(1); }
+        if (res.status === 429) { console.log(`\n${C.yellow}limite de streams desta sessão (8) — feche outro terminal ou o app e tente de novo${C.reset}`); }
         if (!res.ok || !res.body) throw new Error(`stream ${res.status}`);
         backoff = 1000;
+        sawDelta = false;   // reconectou: o texto consolidado do replay precisa aparecer (delta não volta)
         let buf = "";
         for await (const chunk of res.body) {
           buf += Buffer.from(chunk).toString("utf8");
@@ -284,12 +313,18 @@ async function cmdAttach(id) {
             if (typeof e.i === "number") from = e.i + 1;
             if (e.kind === "delta") sawDelta = true;
             if (e.kind === "user") sawDelta = false;
+            // primeiro evento AO VIVO depois do replay: marca a fronteira (senão o attach parece
+            // que o agente está trabalhando quando na verdade você está lendo o passado)
+            if (!live && (e.kind === "turn_end" || e.kind === "permission_request" || e.kind === "delta")) {
+              live = true; process.stdout.write(`${C.dim}${"─".repeat(Math.max(10, cols() - 10))} ao vivo${C.reset}\n`);
+            }
             if (e.kind === "text" && !sawDelta) { process.stdout.write(`\n${e.text || ""}\n`); continue; }
-            if (e.kind === "permission_request") pendingReq = e.requestId;
-            if (e.kind === "permission_resolved") pendingReq = null;
-            render(e);
+            if (e.kind === "permission_request") pending.push(e.requestId);
+            if (e.kind === "permission_resolved") { const k = pending.indexOf(e.requestId); if (k >= 0) pending.splice(k, 1); }
+            try { render(e); } catch (err) { if (process.env.XNEOG_DEBUG) console.error(err); }
           }
         }
+        await new Promise(r => setTimeout(r, 250));   // fim limpo (sessão morta): não refazer fetch em busy-loop
       } catch {
         await new Promise(r => setTimeout(r, backoff));
         backoff = Math.min(backoff * 2, 15000);
@@ -314,10 +349,19 @@ async function cmdAttach(id) {
 
   const rl = createInterface({ input: process.stdin, output: process.stdout, prompt: `${C.cyan}❯ ${C.reset}` });
   rl.on("close", () => process.exit(0));
+  // Ctrl-C = reflexo universal de "para isso" → interrompe o TURNO (a sessão vive). 2º Ctrl-C sai.
+  let sigints = 0;
+  rl.on("SIGINT", async () => {
+    if (++sigints >= 2) { process.stdout.write(`\n${C.dim}saindo — a sessão continua no Mac${C.reset}\n`); process.exit(0); }
+    setTimeout(() => { sigints = 0; }, 3000);
+    process.stdout.write(`\n${C.dim}interrompendo o turno… (Ctrl-C de novo p/ sair · /q desconecta)${C.reset}\n`);
+    await api(`/sessions/${id}/interrupt`, { method: "POST" }, true);
+    rl.prompt();
+  });
   rl.prompt();
   const PROMPT = `${C.cyan}❯ ${C.reset}`, PROMPT_ML = `${C.dim}… ${C.reset}`;
   const send = async (text) => {
-    const r = await api(`/sessions/${id}/message`, { method: "POST", body: JSON.stringify({ text, via: "terminal" }) });
+    const r = await api(`/sessions/${id}/message`, { method: "POST", body: JSON.stringify({ text, via: "terminal" }) }, true);
     if (r.status !== 200) console.error(`${C.red}falhou: ${r.text}${C.reset}`);
   };
   let ml = null;   // { mode: "fence"|"bslash", lines: [] }
@@ -352,20 +396,20 @@ async function cmdAttach(id) {
     if (t.startsWith("/model")) {
       const m = t.split(/\s+/)[1] || "";
       if (!m) { process.stdout.write(`${C.dim}uso: /model sonnet|opus|fable|haiku (ou claude-* p/ engine api)${C.reset}\n`); return rl.prompt(); }
-      const r = await api(`/sessions/${id}/model`, { method: "POST", body: JSON.stringify({ model: m }) });
+      const r = await api(`/sessions/${id}/model`, { method: "POST", body: JSON.stringify({ model: m }) }, true);
       if (r.status !== 200) console.error(`${C.red}${r.text}${C.reset}`);
       return rl.prompt();
     }
     if (t.startsWith("/mode")) {
       const m = t.split(/\s+/)[1] || "";
       if (!m) { process.stdout.write(`${C.dim}uso: /mode default|acceptEdits|plan|auto${C.reset}\n`); return rl.prompt(); }
-      const r = await api(`/sessions/${id}/mode`, { method: "POST", body: JSON.stringify({ mode: m }) });
+      const r = await api(`/sessions/${id}/mode`, { method: "POST", body: JSON.stringify({ mode: m }) }, true);
       if (r.status !== 200) console.error(`${C.red}${r.text}${C.reset}`);
       return rl.prompt();
     }
-    if (t === "/stop") { await api(`/sessions/${id}/interrupt`, { method: "POST" }); return rl.prompt(); }
+    if (t === "/stop") { await api(`/sessions/${id}/interrupt`, { method: "POST" }, true); return rl.prompt(); }
     if (t === "/tasks") {
-      const r = await api(`/sessions/${id}/tasks`);
+      const r = await api(`/sessions/${id}/tasks`, {}, true);
       const runs = r.json?.runs || [];
       if (!runs.length) process.stdout.write(`${C.dim}(sem subagentes nesta sessão)${C.reset}\n`);
       for (const run of runs) {
@@ -388,16 +432,22 @@ async function cmdAttach(id) {
       }
       return rl.prompt();
     }
-    if (pendingReq && t.toLowerCase() === "e") {
-      await api(`/sessions/${id}/permission/bulk`, { method: "POST", body: JSON.stringify({ approve: true, always: true }) });
-      pendingReq = null;
+    if (pending.length && t.toLowerCase() === "e") {
+      // o lote do daemon só resolve a família de EDIÇÃO — se nada foi resolvido, o pendente segue vivo
+      const r = await api(`/sessions/${id}/permission/bulk`, { method: "POST", body: JSON.stringify({ approve: true, always: true }) }, true);
+      const n = r.json?.resolved ?? 0;
+      if (!n) process.stdout.write(`${C.dim}nada em lote (Bash não entra em "sempre") — responda y/n${C.reset}\n`);
       return rl.prompt();
     }
-    if (pendingReq && ["y", "n", "a"].includes(t.toLowerCase())) {
+    if (pending.length && ["y", "n", "a"].includes(t.toLowerCase())) {
       const approve = t.toLowerCase() !== "n";
       const always = t.toLowerCase() === "a";
-      await api(`/sessions/${id}/permission`, { method: "POST", body: JSON.stringify({ requestId: pendingReq, approve, always }) });
-      pendingReq = null;
+      const rid = pending[0];   // FIFO: responde o pedido mais antigo, não "o último visto"
+      const r = await api(`/sessions/${id}/permission`, { method: "POST", body: JSON.stringify({ requestId: rid, approve, always }) }, true);
+      if (r.status !== 200) {
+        process.stdout.write(`${C.dim}essa aprovação já tinha sido resolvida (timeout de 120s ou outro cliente)${C.reset}\n`);
+        const k = pending.indexOf(rid); if (k >= 0) pending.splice(k, 1);
+      }
       return rl.prompt();
     }
     if (!t) return rl.prompt();
@@ -413,17 +463,17 @@ function help() {
 ${C.cyan}uso:${C.reset}
   xneog login [--base URL] [--key K] [--keychain]   configura credencial (BYOK; valida antes de gravar)
   xneog ls                                lista sessões (título de IA, engine, fila)
-  xneog new [cwd] [--engine claude|grok|api] [--model M] [--profile safe|edit] [--title T]
+  xneog new [cwd] [--engine claude|grok|api] [--model M] [--profile safe|edit|auto] [--title T]
   xneog attach <id>                       entra numa sessão (streaming + composer + aprovação)
   xneog import <claudeSessionId>          importa sessão do Claude Code CLI (reviveável)
   xneog models                            engines/modelos do registry (engines.json)
   xneog pair [nome]                       código p/ parear um device (app iOS) neste daemon
   xneog meta                              identidade e capabilities do daemon
 
-${C.cyan}perfis:${C.reset} safe = tudo pede aprovação · edit = edições entram sozinhas (Bash pede)
-${C.dim}"full" não existe: bypass de aprovação não é exposto pelo daemon — doutrina.${C.reset}
+${C.cyan}perfis:${C.reset} safe = tudo pede · edit = edições + Bash de leitura passam · auto = daemon aprova tudo (auditado)
+${C.dim}"full" não existe: bypass global não é exposto pelo daemon — a fila é server-side, até no auto.${C.reset}
 
-${C.cyan}no attach:${C.reset} "/" menu · /model /mode /stop /tasks · """ multiline · y/n/a/e aprovação · /q sai`);
+${C.cyan}no attach:${C.reset} "/" menu · /model /mode /stop /tasks · """ multiline · y/n/a/e aprovação · Ctrl-C interrompe · /q desconecta`);
 }
 
 // ── pair: gera código de uso único p/ registrar um device (app iOS) no daemon ─
