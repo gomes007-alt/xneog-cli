@@ -25,7 +25,7 @@ import { execFileSync } from "node:child_process";
 const HOME = homedir();
 const CFG_DIR = `${HOME}/.xneog`;
 const CFG_FILE = `${CFG_DIR}/config.json`;
-const VERSION = "0.7.0";
+const VERSION = "0.8.0";
 
 const C = { dim: "\x1b[2m", reset: "\x1b[0m", cyan: "\x1b[36m", green: "\x1b[32m", yellow: "\x1b[33m", red: "\x1b[31m", bold: "\x1b[1m" };
 
@@ -218,16 +218,39 @@ function render(e) {
       break;
     }
     case "bulk_resolved":
-      process.stdout.write(`\n${C.green}lote: ${e.resolved} ${e.approve ? "aprovada(s)" : "negada(s)"}${e.always ? " · edições liberadas nesta sessão" : ""}${C.reset}\n${C.cyan}❯ ${C.reset}`);
+      process.stdout.write(`\n${C.green}lote: ${e.resolved} ${e.approve ? "aprovada(s)" : "negada(s)"}${e.always ? " · edições liberadas nesta sessão" : ""}${C.reset}\n`);
       break;
     case "queued":
-      process.stdout.write(`\n${C.dim}⏳ na fila (${e.depth}): ${String(e.text || "").slice(0, 60)}${C.reset}\n${C.cyan}❯ ${C.reset}`);
+      process.stdout.write(`\n${C.dim}⏳ na fila (${e.depth}): ${String(e.text || "").slice(0, 60)}${C.reset}\n`);
+      break;
+    case "init":            // modelo REAL da sessão (o banner só sabia a preferência gravada)
+      if (e.model) { STATUS = `${STATUS.split(" · ")[0]} · ${e.model.replace(/^claude-/, "")}`;
+        process.stdout.write(`${C.dim}▎ modelo: ${e.model}${C.reset}\n`); }
+      break;
+    case "tool_result": {   // sem isto, erro de ferramenta era invisível: o turno parava sem motivo
+      const out = String(e.output || "").trim();
+      if (!out) break;
+      const cor = e.isError ? C.red : C.dim;
+      const linhas = out.split("\n");
+      const corte = linhas.slice(0, e.isError ? 12 : 4);
+      process.stdout.write(corte.map(l => `${cor}  │ ${l.slice(0, 160)}${C.reset}`).join("\n") + "\n");
+      if (linhas.length > corte.length) process.stdout.write(`${C.dim}  │ ⋯ +${linhas.length - corte.length} linhas${C.reset}\n`);
+      break;
+    }
+    case "command":         // slash command local resolvido pelo CLI (chip, não bolha)
+      process.stdout.write(`\n${C.cyan}${e.name}${C.reset}${e.output ? `\n${C.dim}${String(e.output).slice(0, 800)}${C.reset}` : ""}\n`);
+      break;
+    case "session_revived":
+      process.stdout.write(`${C.green}sessão reanimada com histórico${C.reset}\n`);
+      break;
+    case "queue_removed":
+      process.stdout.write(`${C.dim}removido da fila (${e.depth} restante(s))${C.reset}\n`);
       break;
     case "queue_cleared":
       process.stdout.write(`\n${C.dim}fila descartada (${e.dropped}) · ${e.reason}${C.reset}\n`);
       break;
     case "permission_resolved":
-      process.stdout.write(`${e.approved ? C.green + "aprovado" : C.red + "negado"}${C.reset} ${C.dim}(por ${e.by})${C.reset}\n`);
+      process.stdout.write(`${e.approved ? C.green + "aprovado" : C.red + "negado"}${C.reset} ${C.dim}(${{app: "por você no app", "app-bulk": "em lote pelo app", auto: "auto-aprovado · auditado", "auto-read": "leitura · auto-aprovado", always: "grant desta sessão", timeout: "TIMEOUT de 120s — ninguém respondeu"}[e.by] || `por ${e.by}`})${C.reset}\n`);
       break;
     case "turn_end": {
       const rest = e.next ? ` · próxima da fila entrando${e.queued ? ` (${e.queued} atrás)` : ""}` : "";
@@ -241,7 +264,7 @@ function render(e) {
       break;
     case "session_end": process.stdout.write(`\n${C.red}sessão encerrada${C.reset}\n`); break;
     case "mode_changed":  process.stdout.write(`\n${C.dim}modo → ${e.mode}${C.reset}\n`); break;
-    case "model_changed": process.stdout.write(`\n${C.dim}modelo → ${e.model || "padrão"}${C.reset}\n`); break;
+    case "model_changed": STATUS = `${STATUS.split(" · ")[0]}${e.model ? ` · ${e.model}` : ""}`; process.stdout.write(`\n${C.dim}modelo → ${e.model || "padrão"}${C.reset}\n`); break;
   }
 }
 // ── boot banner (padrão dos CLIs de referência: logo compacta + ficha + avisos acionáveis) ──
@@ -284,6 +307,7 @@ async function cmdAttach(id) {
   // enquanto outra segue pendente. Com uma variável única, o "y" caía na aprovação errada — ou virava
   // MENSAGEM pro modelo depois que o app resolveu a única que o terminal conhecia.
   const pending = [];
+  let RL = null;          // readline (nasce depois do stream): redesenho da linha em edição
   let sawDelta = false;
 
   // cursor = `seq` da sessão (id monotônico do daemon). `count` é só o tamanho do buffer e NUNCA é
@@ -322,6 +346,8 @@ async function cmdAttach(id) {
             if (e.kind === "permission_request") pending.push(e.requestId);
             if (e.kind === "permission_resolved") { const k = pending.indexOf(e.requestId); if (k >= 0) pending.splice(k, 1); }
             try { render(e); } catch (err) { if (process.env.XNEOG_DEBUG) console.error(err); }
+            // redesenha a linha que você está digitando (o evento passou por cima dela)
+            if (RL && e.kind !== "delta") RL.prompt(true);
           }
         }
         await new Promise(r => setTimeout(r, 250));   // fim limpo (sessão morta): não refazer fetch em busy-loop
@@ -348,6 +374,7 @@ async function cmdAttach(id) {
   }
 
   const rl = createInterface({ input: process.stdin, output: process.stdout, prompt: `${C.cyan}❯ ${C.reset}` });
+  RL = rl;
   rl.on("close", () => process.exit(0));
   // Ctrl-C = reflexo universal de "para isso" → interrompe o TURNO (a sessão vive). 2º Ctrl-C sai.
   let sigints = 0;
@@ -365,7 +392,26 @@ async function cmdAttach(id) {
     if (r.status !== 200) console.error(`${C.red}falhou: ${r.text}${C.reset}`);
   };
   let ml = null;   // { mode: "fence"|"bslash", lines: [] }
-  rl.on("line", async (raw) => {
+  // PASTE: colar um log de 10 linhas disparava 1 turno + 9 na fila. O readline entrega uma linha
+  // por vez e não avisa que foi paste; rajada (<45ms entre linhas) = colagem → vira UM turno só.
+  // Custo p/ quem digita: 45ms imperceptíveis antes de enviar.
+  let burst = [], burstT = null;
+  rl.on("line", (raw) => {
+    burst.push(raw);
+    clearTimeout(burstT);
+    burstT = setTimeout(async () => {
+      const linhas = burst; burst = []; burstT = null;
+      if (linhas.length > 1 && !ml) {         // colagem fora do bloco """: um turno com tudo
+        const texto = linhas.join("\n").trim();
+        process.stdout.write(`${C.dim}(colado: ${linhas.length} linhas → 1 turno)${C.reset}\n`);
+        if (texto) await send(texto);
+        return rl.prompt();
+      }
+      for (const l of linhas) await handleLine(l);
+    }, 45);
+  });
+
+  async function handleLine(raw) {
     if (ml) {
       if (ml.mode === "fence") {
         if (raw.trim() === '"""') {
@@ -453,7 +499,85 @@ async function cmdAttach(id) {
     if (!t) return rl.prompt();
     await send(t);
     rl.prompt();
-  });
+  }
+}
+
+
+// ── headless: manda um prompt pra sessão VIVA deste diretório e sai ─────────
+// Nenhum concorrente faz isto: `claude -p` nasce e morre no processo; aqui o turno entra numa
+// sessão de longa duração (com histórico) e você lê a resposta no stdout — serve pra cron e script.
+async function cmdPrompt(texto, { engine, model, profile } = {}) {
+  const r = await api("/sessions");
+  const cwd = process.cwd();
+  let S = (r.json?.sessions || []).filter(x => x.cwd === cwd && x.archived !== true)
+                                   .sort((a, b) => b.lastTs - a.lastTs)[0];
+  if (!S) {                                    // sem sessão aqui: cria uma silenciosa
+    const body = { cwd, title: cwd.split("/").pop() || "headless" };
+    if (engine) body.engine = engine;
+    if (model) body.model = model;
+    if (profile) body.permissionMode = PROFILES[profile] || "default";
+    const c = await api("/sessions", { method: "POST", body: JSON.stringify(body) });
+    if (c.status !== 200) { console.error(c.text); process.exit(1); }
+    S = { id: c.json.id, seq: 0 };
+  }
+  const id = S.id;
+  let from = Math.max(0, (S.seq || 0));
+  const res = await fetch(`${CFG.base}/sessions/${id}/stream?from=${from}&client=terminal`, { headers: { Authorization: H.Authorization } });
+  if (!res.ok || !res.body) { console.error(`stream ${res.status}`); process.exit(1); }
+  const env = await api(`/sessions/${id}/message`, { method: "POST", body: JSON.stringify({ text: texto, via: "terminal" }) });
+  if (env.status !== 200) { console.error(env.text); process.exit(1); }
+  let buf = "", saida = "", code = 0;
+  for await (const chunk of res.body) {
+    buf += Buffer.from(chunk).toString("utf8");
+    const frames = buf.split("\n\n"); buf = frames.pop() ?? "";
+    for (const f of frames) {
+      const line = f.split("\n").find(l => l.startsWith("data:"));
+      if (!line) continue;
+      let e; try { e = JSON.parse(line.slice(5)); } catch { continue; }
+      if (e.kind === "delta") { saida += e.text || ""; process.stdout.write(e.text || ""); }
+      else if (e.kind === "text" && !saida) { saida = e.text || ""; process.stdout.write(saida + "\n"); }
+      else if (e.kind === "permission_request") {
+        // headless não tem quem aprove no terminal — avisa e deixa o app/celular decidir
+        process.stderr.write(`\n${C.yellow}⌘ aprovação pendente (${e.tool}) — responda no app; 120s p/ decidir${C.reset}\n`);
+      }
+      else if (e.kind === "turn_end") { code = e.ok === false ? 1 : 0; process.stdout.write("\n"); process.exit(code); }
+      else if (e.kind === "session_end") { process.stderr.write("sessão encerrada\n"); process.exit(1); }
+    }
+  }
+  process.exit(code);
+}
+
+// ── doctor: primeira coisa a rodar quando "não conecta" ────────────────────
+async function cmdDoctor() {
+  const linha = (ok, txt, extra = "") => console.log(`${ok ? C.green + "✔" : C.red + "✘"}${C.reset} ${txt}${extra ? ` ${C.dim}${extra}${C.reset}` : ""}`);
+  console.log(`${C.bold}xneog doctor${C.reset} ${C.dim}v${VERSION}${C.reset}\n`);
+  // credencial: de onde veio
+  const origem = process.env.NATIVE_API_KEY ? "variável de ambiente"
+    : (() => { try { return JSON.parse(readFileSync(CFG_FILE, "utf8")).key === "@keychain" ? "Keychain (xneog-cli)" : "~/.xneog/config.json"; } catch { return "~/.xneog/env (host)"; } })();
+  linha(!!CFG.key, `credencial: ${CFG.key ? origem : "AUSENTE — rode xneog login"}`);
+  linha(true, `daemon configurado: ${CFG.base}`);
+  // alcance + protocolo
+  let meta = null;
+  try {
+    const r = await fetch(`${CFG.base}/meta`, { headers: H, signal: AbortSignal.timeout(8000) });
+    if (r.status === 401 || r.status === 403) { linha(false, `daemon respondeu ${r.status} — credencial recusada (xneog login)`); }
+    else { meta = await r.json(); linha(true, `daemon respondendo`, `${meta.name} · protocol ${meta.protocol}`); }
+  } catch (e) { linha(false, `daemon inacessível`, e.message); }
+  if (meta) {
+    linha(meta.protocol === 1, `protocolo compatível`, meta.protocol === 1 ? "" : `este cliente fala v1, o daemon fala v${meta.protocol} — atualize o xneog`);
+    console.log(`  ${C.dim}capabilities: ${(meta.capabilities || []).join(" · ")}${C.reset}`);
+    const h = await api("/health");
+    if (h.status === 200) linha(true, `sessões: ${h.json.sessions} · aprovações pendentes: ${h.json.pending}`);
+    const s = await api("/sessions");
+    const pend = (s.json?.sessions || []).filter(x => (x.needsInput || 0) > 0);
+    if (pend.length) console.log(`${C.yellow}⚠${C.reset} ${pend.length} sessão(ões) esperando aprovação: ${pend.map(x => x.id).join(", ")}`);
+  }
+  // PATH: o clássico "done — try it" seguido de command not found
+  try {
+    const w = execFileSync("which", ["xneog"], { encoding: "utf8" }).trim();
+    linha(true, `binário no PATH`, w);
+  } catch { linha(false, `xneog não está no PATH`, "adicione o bin global do npm ao PATH (npm bin -g)"); }
+  console.log(`\n${C.dim}config: ${CFG_FILE} · segredos do host: ~/.xneog/env${C.reset}`);
 }
 
 // ── entrypoint ───────────────────────────────────────────────────────────────
@@ -469,6 +593,8 @@ ${C.cyan}uso:${C.reset}
   xneog models                            engines/modelos do registry (engines.json)
   xneog pair [nome]                       código p/ parear um device (app iOS) neste daemon
   xneog meta                              identidade e capabilities do daemon
+  xneog doctor                            diagnóstico: credencial, daemon, protocolo, PATH
+  xneog -p "texto"                        headless: manda um turno pra sessão viva deste diretório
 
 ${C.cyan}perfis:${C.reset} safe = tudo pede · edit = edições + Bash de leitura passam · auto = daemon aprova tudo (auditado)
 ${C.dim}"full" não existe: bypass global não é exposto pelo daemon — a fila é server-side, até no auto.${C.reset}
@@ -530,6 +656,8 @@ else if (cmd === "import" && args[0]) { needKey(); await cmdImport(args[0]); }
 else if (cmd === "models") { needKey(); await cmdModels(); }
 else if (cmd === "pair") { needKey(); await cmdPair(nameFlag || args[0] || ""); }
 else if (cmd === "meta") { needKey(); await cmdMeta(); }
+else if (cmd === "doctor") { await cmdDoctor(); }
+else if (cmd === "-p" || cmd === "--prompt") { needKey(); await cmdPrompt(args.join(" "), { engine, model, profile }); }
 else if (cmd === "--version" || cmd === "-v") console.log(VERSION);
 else if (cmd === "help" || cmd === "-h" || cmd === "--help") help();
 else if (!cmd && process.stdin.isTTY) await cmdDefault();
