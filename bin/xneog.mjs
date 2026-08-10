@@ -27,7 +27,7 @@ import { execFileSync } from "node:child_process";
 const HOME = homedir();
 const CFG_DIR = `${HOME}/.xneog`;
 const CFG_FILE = `${CFG_DIR}/config.json`;
-const VERSION = "0.9.6";
+const VERSION = "0.9.7";
 
 const C = { dim: "\x1b[2m", reset: "\x1b[0m", cyan: "\x1b[36m", green: "\x1b[32m", yellow: "\x1b[33m", red: "\x1b[31m", bold: "\x1b[1m" };
 
@@ -40,11 +40,11 @@ function mdStream(t) {
   let out = "", buf = _mdPend + t; _mdPend = "";
   for (let i = 0; i < buf.length; i++) {
     const c = buf[i], n = buf[i + 1];
-    if (c === "*" && n === undefined) { _mdPend = "*"; break; }          // pode virar ** no próximo delta
-    if (c === "*" && n === "*") { _mdBold = !_mdBold; out += _mdBold ? C.bold : C.reset; i++; continue; }
+    if (!_mdCode && c === "*" && n === undefined) { _mdPend = "*"; break; }          // pode virar ** no próximo delta
+    if (!_mdCode && c === "*" && n === "*") { _mdBold = !_mdBold; out += _mdBold ? C.bold : C.reset; i++; continue; }
     if (c === "`") { _mdCode = !_mdCode; out += _mdCode ? C.cyan : C.reset; continue; }
-    if (_mdBol && (c === "-" || c === "*") && n === " ") { out += `${C.dim}•${C.reset}`; _mdBol = false; continue; }
-    if (_mdBol && c === "#") {                                            // # título → negrito ATÉ O FIM DA LINHA
+    if (!_mdCode && _mdBol && (c === "-" || c === "*") && n === " ") { out += `${C.dim}•${C.reset}`; _mdBol = false; continue; }
+    if (!_mdCode && _mdBol && c === "#") {                                            // # título → negrito ATÉ O FIM DA LINHA
       let j = i; while (buf[j] === "#") j++;
       if (buf[j] === " ") { out += C.bold; _mdBold = true; _mdHdr = true; i = j; _mdBol = false; continue; }
     }
@@ -119,7 +119,7 @@ const api = async (path, opts = {}, soft = false) => {
   return { status: r.status, json: j, text: t };
 };
 function needKey() {
-  if (CFG.key) return;
+  if (CFG.key || CFG.device?.id) return;   // conta (device) OU key de máquina
   console.error(`${C.red}sem credencial.${C.reset} rode: ${C.bold}xneog login${C.reset} (ou exporte NATIVE_API_KEY)`);
   process.exit(1);
 }
@@ -155,6 +155,7 @@ async function cmdLoginBrowser(baseFlag) {
       j = await r2.json();
       if (r2.status === 404) throw new Error("login expirou — rode xneog login de novo");
     } catch { continue; }
+    if (j && j.error && /expirad/i.test(j.error)) throw new Error("login expirou — rode xneog login de novo");
     if (j && j.deviceId && j.secret) {
       let atual = {}; try { atual = JSON.parse(readFileSync(CFG_FILE, "utf8")); } catch {}
       mkdirSync(CFG_DIR, { recursive: true, mode: 0o700 });
