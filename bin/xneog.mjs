@@ -27,7 +27,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 const HOME = homedir();
 const CFG_DIR = `${HOME}/.xneog`;
 const CFG_FILE = `${CFG_DIR}/config.json`;
-const VERSION = "0.10.1";
+const VERSION = "0.11.0";
 
 const C = { dim: "\x1b[2m", reset: "\x1b[0m", cyan: "\x1b[36m", green: "\x1b[32m", yellow: "\x1b[33m", red: "\x1b[31m", bold: "\x1b[1m" };
 
@@ -92,6 +92,10 @@ process.stdout.on("error", (e) => { if (e && e.code === "EPIPE") process.exit(0)
 if (process.platform === "win32") { try { execFileSync("chcp 65001", { stdio: "ignore", shell: true }); } catch {} }
 const CFG = loadConfig();
 function credencial() {
+  // Convenção universal (e do Claude Code): ENV vence arquivo. Sem isto, quem tinha conta
+  // gravada não conseguia apontar o CLI pra outro daemon com NATIVE_API_KEY — o device da
+  // cloud ia junto e o daemon local respondia 401.
+  if (process.env.NATIVE_API_KEY) return `Bearer ${process.env.NATIVE_API_KEY}`;
   if (CFG.device?.id && CFG.device?.secret) {
     const exp = Date.now() + 10 * 60 * 1000;
     const mac = createHmac("sha256", CFG.device.secret).update(`${CFG.device.id}.${exp}`).digest("hex");
@@ -836,6 +840,8 @@ ${C.cyan}uso:${C.reset}
   xneog ls                                lista sessões (título de IA, engine, fila)
   xneog new [cwd] [--engine claude|grok|api] [--model M] [--profile safe|edit|auto] [--title T]
   xneog attach <id>                       entra numa sessão (streaming + composer + aprovação)
+  xneog push <arquivo> [nome]             manda um arquivo pro workspace da sessão
+  xneog pull <nome> [saida]               baixa um arquivo do workspace da sessão
   xneog import <claudeSessionId>          importa sessão do Claude Code CLI (reviveável)
   xneog models                            engines/modelos do registry (engines.json)
   xneog pair [nome]                       código p/ parear um device (app iOS) neste daemon
@@ -877,12 +883,41 @@ const base = flag("--base");
 const keyFlag = flag("--key");
 const keychain = boolFlag("--keychain");
 const contFlag = boolFlag("--continue") || boolFlag("-c");
+const sessionFlag = flag("--session");
 const codeFlag = flag("--code");
 const nameFlag = flag("--name");
 const args = argv.slice(1);
 
 // `xneog` puro num TTY = experiência Claude Code: reusa a sessão viva mais recente DESTE
 // diretório, ou cria uma nova aqui e já entra no chat. Help fica em `xneog help` / não-TTY.
+// push/pull de arquivo pro workspace da sessão. Sem isto a jaula do membro nasce vazia e ele
+// não tem como colocar nada lá (no Windows não há Bash). Sessão-alvo = a mais recente da
+// conta (ou --session <id>), mesma regra do --continue.
+async function cmdFile(op, arquivo, destino) {
+  const r = await api("/sessions");
+  const vivas = (r.json?.sessions || []).filter(x => x.archived !== true && x.status !== "dead").sort((a, b) => b.lastTs - a.lastTs);
+  const sid = sessionFlag || vivas[0]?.id;
+  if (!sid) return console.error(`${C.red}nenhuma sessão viva${C.reset} — crie com ${C.bold}xneog${C.reset}`);
+  const nome = destino || arquivo.split("/").pop();
+  const u = `${CFG.base}/sessions/${sid}/file?path=${encodeURIComponent(nome)}`;
+  try {
+    if (op === "push") {
+      const body = readFileSync(arquivo);
+      const resp = await fetch(u, { method: "PUT", headers: { Authorization: H.Authorization, "content-type": "application/octet-stream" }, body });
+      const j = await resp.json().catch(() => ({}));
+      if (!resp.ok) throw new Error(j.error || `HTTP ${resp.status}`);
+      console.log(`${C.green}enviado${C.reset} ${nome} ${C.dim}(${j.bytes} bytes) → sessão ${sid}${C.reset}`);
+    } else {
+      const resp = await fetch(u, { headers: { Authorization: H.Authorization } });
+      if (!resp.ok) { const j = await resp.json().catch(() => ({})); throw new Error(j.error || `HTTP ${resp.status}`); }
+      const buf = Buffer.from(await resp.arrayBuffer());
+      const saida = destino && op === "pull" ? destino : arquivo.split("/").pop();
+      writeFileSync(saida, buf);
+      console.log(`${C.green}baixado${C.reset} ${saida} ${C.dim}(${buf.length} bytes) da sessão ${sid}${C.reset}`);
+    }
+  } catch (e) { console.error(`${C.red}falhou: ${e.message}${C.reset}`); process.exit(1); }
+}
+
 async function cmdDefault() {
   needKey();
   const cwd = process.cwd();
@@ -923,6 +958,8 @@ else if (cmd === "login") await cmdLoginBrowser(base).catch((e) => { console.err
 else if (cmd === "ls") { needKey(); await cmdLs(); }
 else if (cmd === "new") { needKey(); await cmdNew(args[0], { title, engine, model, profile }); }
 else if (cmd === "attach" && args[0]) { needKey(); await cmdAttach(args[0]); }
+else if (cmd === "push" && args[0]) { needKey(); await cmdFile("push", args[0], args[1]); }
+else if (cmd === "pull" && args[0]) { needKey(); await cmdFile("pull", args[0], args[1]); }
 else if (cmd === "import" && args[0]) { needKey(); await cmdImport(args[0]); }
 else if (cmd === "models") { needKey(); await cmdModels(); }
 else if (cmd === "pair") { needKey(); await cmdPair(nameFlag || args[0] || ""); }
