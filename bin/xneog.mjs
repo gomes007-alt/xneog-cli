@@ -27,7 +27,7 @@ import { execFileSync } from "node:child_process";
 const HOME = homedir();
 const CFG_DIR = `${HOME}/.xneog`;
 const CFG_FILE = `${CFG_DIR}/config.json`;
-const VERSION = "0.9.0";
+const VERSION = "0.9.1";
 
 const C = { dim: "\x1b[2m", reset: "\x1b[0m", cyan: "\x1b[36m", green: "\x1b[32m", yellow: "\x1b[33m", red: "\x1b[31m", bold: "\x1b[1m" };
 
@@ -92,6 +92,45 @@ function needKey() {
   if (CFG.key) return;
   console.error(`${C.red}sem credencial.${C.reset} rode: ${C.bold}xneog login${C.reset} (ou exporte NATIVE_API_KEY)`);
   process.exit(1);
+}
+
+// ── `xneog login` puro = padrão Claude Code: abre o browser, você autentica na sua conta
+// (Google/Apple) e o terminal recebe a credencial SOZINHO por polling — zero copy-paste.
+// Fallbacks: `--code XXXX` (colar código do web) · `--key/--keychain` ou `login maquina` (BYOK).
+async function cmdLoginBrowser(baseFlag) {
+  const BFF = process.env.XNEOG_CONTA_BASE || "https://web.xneog.com";
+  let st;
+  try {
+    const r = await fetch(`${BFF}/auth/cli/start`, { method: "POST" });
+    st = await r.json();
+    if (!r.ok || !st.code) throw new Error(st.error || `HTTP ${r.status}`);
+  } catch (e) { throw new Error(`não conectou em ${BFF} (${e.message})`); }
+  const abrir = process.platform === "darwin" ? ["open", [st.url]]
+    : process.platform === "win32" ? ["cmd", ["/c", "start", "", st.url]]
+    : ["xdg-open", [st.url]];
+  try { execFileSync(abrir[0], abrir[1], { stdio: "ignore" }); } catch {}
+  console.log(`${C.bold}Abra (ou já abriu) no browser:${C.reset} ${st.url}`);
+  console.log(`${C.dim}código ${st.code} · aguardando você entrar na conta… (Ctrl-C cancela)${C.reset}`);
+  const fim = Date.now() + (st.expiresInSec || 300) * 1000;
+  while (Date.now() < fim) {
+    await new Promise((r) => setTimeout(r, 2000));
+    let j;
+    try {
+      const r2 = await fetch(`${BFF}/auth/cli/poll`, { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ code: st.code, poll: st.poll }) });
+      j = await r2.json();
+      if (r2.status === 404) throw new Error("login expirou — rode xneog login de novo");
+    } catch { continue; }
+    if (j && j.deviceId && j.secret) {
+      let atual = {}; try { atual = JSON.parse(readFileSync(CFG_FILE, "utf8")); } catch {}
+      mkdirSync(CFG_DIR, { recursive: true, mode: 0o700 });
+      writeFileSync(CFG_FILE, JSON.stringify({ ...atual, base: j.base, device: { id: j.deviceId, secret: j.secret } }, null, 2), { mode: 0o600 });
+      console.log(`${C.green}conectado à sua conta xNeog${C.reset} · ${j.tenant} · device ${j.deviceId}`);
+      console.log(`${C.dim}pronto: xneog (retoma) · xneog ls · xneog new${C.reset}`);
+      return;
+    }
+  }
+  throw new Error("tempo esgotado — rode xneog login de novo");
 }
 
 // ── login de CONTA (padrão Claude Code): código gerado no web app → device pareado no
@@ -509,7 +548,12 @@ async function cmdAttach(id) {
     }
     if (t.startsWith("/login")) {
       const code = t.split(/\s+/)[1] || "";
-      if (!code) { process.stdout.write(`${C.dim}uso: /login <código> — gere no web app (botão CLI). Troca a credencial deste terminal.${C.reset}\n`); return rl.prompt(); }
+      if (!code) {
+        process.stdout.write(`${C.dim}abrindo o browser pra autenticar… (ou /login <código>)${C.reset}\n`);
+        try { await cmdLoginBrowser(); process.stdout.write(`${C.green}credencial trocada — /q e reabra pra usar a conta nova${C.reset}\n`); }
+        catch (e2) { process.stdout.write(`${C.red}${e2.message}${C.reset}\n`); }
+        return rl.prompt();
+      }
       try {
         const b = (CFG.base.startsWith("http://127.") ? "https://agentd.xneog.com" : CFG.base).replace(/\/$/, "");
         const r = await fetch(`${b}/pair/claim`, { method: "POST", headers: { "Content-Type": "application/json" },
@@ -736,7 +780,9 @@ async function cmdDefault() {
 }
 
 if (cmd === "login" && codeFlag) await cmdLoginConta(codeFlag, base);
-else if (cmd === "login") await cmdLogin(base, keychain, keyFlag);
+else if (cmd === "login" && (keyFlag || keychain)) await cmdLogin(base, keychain, keyFlag);
+else if (cmd === "login" && args[0] === "maquina") await cmdLogin(base, keychain, keyFlag);
+else if (cmd === "login") await cmdLoginBrowser(base).catch((e) => { console.error(`${C.red}${e.message}${C.reset}`); process.exit(1); });
 else if (cmd === "ls") { needKey(); await cmdLs(); }
 else if (cmd === "new") { needKey(); await cmdNew(args[0], { title, engine, model, profile }); }
 else if (cmd === "attach" && args[0]) { needKey(); await cmdAttach(args[0]); }
