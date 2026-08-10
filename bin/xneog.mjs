@@ -27,9 +27,39 @@ import { execFileSync } from "node:child_process";
 const HOME = homedir();
 const CFG_DIR = `${HOME}/.xneog`;
 const CFG_FILE = `${CFG_DIR}/config.json`;
-const VERSION = "0.9.5";
+const VERSION = "0.9.6";
 
 const C = { dim: "\x1b[2m", reset: "\x1b[0m", cyan: "\x1b[36m", green: "\x1b[32m", yellow: "\x1b[33m", red: "\x1b[31m", bold: "\x1b[1m" };
+
+// ── Markdown no stream (padrão Claude Code) ──────────────────────────────────────────────────
+// Os deltas chegam em pedaços, então **negrito**, `código` e listas precisam de MÁQUINA DE
+// ESTADO com 1 char de lookahead: um "*" ou "`" no fim do pedaço fica PENDENTE até o próximo
+// delta decidir se era marcador. mdReset() no fim do turno cospe o pendente (nada some).
+let _mdBold = false, _mdCode = false, _mdPend = "", _mdBol = true, _mdHdr = false;
+function mdStream(t) {
+  let out = "", buf = _mdPend + t; _mdPend = "";
+  for (let i = 0; i < buf.length; i++) {
+    const c = buf[i], n = buf[i + 1];
+    if (c === "*" && n === undefined) { _mdPend = "*"; break; }          // pode virar ** no próximo delta
+    if (c === "*" && n === "*") { _mdBold = !_mdBold; out += _mdBold ? C.bold : C.reset; i++; continue; }
+    if (c === "`") { _mdCode = !_mdCode; out += _mdCode ? C.cyan : C.reset; continue; }
+    if (_mdBol && (c === "-" || c === "*") && n === " ") { out += `${C.dim}•${C.reset}`; _mdBol = false; continue; }
+    if (_mdBol && c === "#") {                                            // # título → negrito ATÉ O FIM DA LINHA
+      let j = i; while (buf[j] === "#") j++;
+      if (buf[j] === " ") { out += C.bold; _mdBold = true; _mdHdr = true; i = j; _mdBol = false; continue; }
+    }
+    if (c === "\n" && _mdHdr) { out += C.reset; _mdBold = false; _mdHdr = false; }   // header não vaza pra linha seguinte
+    _mdBol = c === "\n";
+    out += c;
+  }
+  return out;
+}
+function mdReset() {
+  let out = _mdPend; _mdPend = "";
+  if (_mdBold || _mdCode) out += C.reset;
+  _mdBold = _mdCode = _mdHdr = false; _mdBol = true;
+  return out;
+}
 
 // ── credenciais: config → env → legado ───────────────────────────────────────
 function loadEnvFile(p) {
@@ -272,8 +302,8 @@ function render(e) {
       if (e.via === "terminal") break;
       process.stdout.write(`\n${C.cyan}❯ ${e.text}${C.reset} ${C.dim}(${e.via === "app" ? "do app" : "de outro cliente"})${C.reset}\n`);
       break;
-    case "delta": process.stdout.write(e.text || ""); break;
-    case "text":  break;   // o delta já imprimiu (engines turn-based mandam text sem delta: imprime)
+    case "delta": process.stdout.write(mdStream(e.text || "")); break;
+    case "text":  process.stdout.write(mdReset()); break;   // o delta já imprimiu
     case "tool_use": {
       let d = ""; try { const o = JSON.parse(e.input || "{}"); d = o.description || o.file_path || o.command || o.pattern || ""; } catch {}
       process.stdout.write(`\n${C.dim}  ⚙ ${e.tool}${d ? ` · ${String(d).slice(0, 60)}` : ""}${C.reset}\n`);
@@ -335,6 +365,7 @@ function render(e) {
       process.stdout.write(`${e.approved ? C.green + "aprovado" : C.red + "negado"}${C.reset} ${C.dim}(${{app: "por você no app", "app-bulk": "em lote pelo app", auto: "auto-aprovado · auditado", "auto-read": "leitura · auto-aprovado", always: "grant desta sessão", timeout: "TIMEOUT de 120s — ninguém respondeu"}[e.by] || `por ${e.by}`})${C.reset}\n`);
       break;
     case "turn_end": {
+      process.stdout.write(mdReset());
       const rest = e.next ? ` · próxima da fila entrando${e.queued ? ` (${e.queued} atrás)` : ""}` : "";
       if (e.model && e.usage) {   // engine api: número MEDIDO, nunca estimado no cliente
         const PRECO = { "claude-haiku-4-5": [1, 5], "claude-sonnet-5": [3, 15], "claude-opus-5": [15, 75], "claude-fable-5": [20, 100] };
