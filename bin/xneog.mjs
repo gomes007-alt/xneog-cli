@@ -27,7 +27,7 @@ import { execFileSync } from "node:child_process";
 const HOME = homedir();
 const CFG_DIR = `${HOME}/.xneog`;
 const CFG_FILE = `${CFG_DIR}/config.json`;
-const VERSION = "0.9.9";
+const VERSION = "0.10.0";
 
 const C = { dim: "\x1b[2m", reset: "\x1b[0m", cyan: "\x1b[36m", green: "\x1b[32m", yellow: "\x1b[33m", red: "\x1b[31m", bold: "\x1b[1m" };
 
@@ -495,6 +495,7 @@ async function cmdAttach(id) {
     { cmd: "/compact", desc: "resume o histórico e continua mais leve/barato" },
     { cmd: "/stop",    desc: "cancela o turno atual (a sessão sobrevive)" },
     { cmd: "/tasks",   desc: "subagentes/workflows da sessão (com fases)" },
+    { cmd: "/init",    desc: "cria o XNEOG.md deste projeto (contexto que o agente lê)" },
     { cmd: "/cost",    desc: "gasto acumulado desta sessão (tokens e US$)" },
     { cmd: "/conta",   desc: "quem sou: credencial, device e daemon" },
     { cmd: "/login",   desc: "conecta este terminal à sua conta (browser)" },
@@ -629,6 +630,12 @@ async function cmdAttach(id) {
       if (!m) { process.stdout.write(`${C.dim}uso: /mode default|acceptEdits|plan|auto${C.reset}\n`); return rl.prompt(); }
       const r = await api(`/sessions/${id}/mode`, { method: "POST", body: JSON.stringify({ mode: m }) }, true);
       if (r.status !== 200) console.error(`${C.red}${r.text}${C.reset}`);
+      return rl.prompt();
+    }
+    if (t === "/init") {
+      // Padrão Claude Code: pede pro próprio agente escrever o arquivo de contexto — ele já
+      // tem as tools (Glob/Read/Write) e enxerga a pasta melhor que um template genérico.
+      await send("Crie o arquivo XNEOG.md nesta pasta (ou atualize se já existir). Antes, explore com Glob/Read o que há aqui. O arquivo é o contexto que VOCÊ vai ler em toda sessão futura: o que é este projeto, como rodar/testar, convenções de código, armadilhas conhecidas e o que NÃO fazer. Denso e específico, sem encher linguiça. Depois de escrever, resuma em 3 linhas o que colocou.");
       return rl.prompt();
     }
     if (t === "/cost") {
