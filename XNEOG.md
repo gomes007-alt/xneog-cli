@@ -10,6 +10,13 @@ repo público (MIT no cliente, daemon é fechado).
 - Instalar local: `npm i -g .` · empacotar: `npm pack`.
 - No winserver: `scp` do tgz + `npm i -g <tgz>` (o box não tem git).
 
+## Suíte E2E da cloud
+`python3 tests-e2e-cloud.py` — 30 asserções contra os hostnames públicos + ssh no box:
+superfícies, tenancy (cria tenant descartável), defaults de sessão, turno com custo medido,
+Bash sem beco, teto por tenant, kill, CLI do box, chat SSE, portas fechadas na internet.
+Roda do Mac, precisa de `AGENTD_CLOUD_KEY` no ~/.xneog/env. **Sempre com User-Agent**: o
+bot-fight do Cloudflare devolve 1010 pra cliente sem UA e o teste parece infra caída.
+
 ## Convenções desta base
 - **Zero dependência de runtime.** Nada de framework TUI: readline puro. Se um recurso
   exigir Ink/blessed, é decisão de produto, não conveniência.
