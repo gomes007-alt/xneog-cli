@@ -22,12 +22,12 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync, unlinkSync } from "
 import { homedir } from "node:os";
 import { createHmac } from "node:crypto";
 import { hostname } from "node:os";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 
 const HOME = homedir();
 const CFG_DIR = `${HOME}/.xneog`;
 const CFG_FILE = `${CFG_DIR}/config.json`;
-const VERSION = "0.10.0";
+const VERSION = "0.10.1";
 
 const C = { dim: "\x1b[2m", reset: "\x1b[0m", cyan: "\x1b[36m", green: "\x1b[32m", yellow: "\x1b[33m", red: "\x1b[31m", bold: "\x1b[1m" };
 
@@ -495,6 +495,7 @@ async function cmdAttach(id) {
     { cmd: "/compact", desc: "resume o histórico e continua mais leve/barato" },
     { cmd: "/stop",    desc: "cancela o turno atual (a sessão sobrevive)" },
     { cmd: "/tasks",   desc: "subagentes/workflows da sessão (com fases)" },
+    { cmd: "/sessions", desc: "lista suas sessões e troca pra outra sem sair" },
     { cmd: "/init",    desc: "cria o XNEOG.md deste projeto (contexto que o agente lê)" },
     { cmd: "/cost",    desc: "gasto acumulado desta sessão (tokens e US$)" },
     { cmd: "/conta",   desc: "quem sou: credencial, device e daemon" },
@@ -631,6 +632,27 @@ async function cmdAttach(id) {
       const r = await api(`/sessions/${id}/mode`, { method: "POST", body: JSON.stringify({ mode: m }) }, true);
       if (r.status !== 200) console.error(`${C.red}${r.text}${C.reset}`);
       return rl.prompt();
+    }
+    if (t === "/sessions" || t === "/resume") {
+      const r = await api("/sessions", {}, true);
+      const ss = (r.json?.sessions || []).filter(x => x.archived !== true && x.status !== "dead").sort((a, b) => b.lastTs - a.lastTs);
+      if (!ss.length) { process.stdout.write(`${C.dim}nenhuma outra sessão viva${C.reset}\n`); return rl.prompt(); }
+      ss.forEach((x, i) => {
+        const eu = x.id === id ? ` ${C.green}(esta)${C.reset}` : "";
+        const idade = x.lastTs ? `${Math.round((Date.now() - x.lastTs) / 60000)}min` : "—";
+        const flag = x.needsInput > 0 ? ` ${C.yellow}[requer entrada]${C.reset}` : x.queued > 0 ? ` ${C.dim}[${x.queued} na fila]${C.reset}` : "";
+        process.stdout.write(`  ${C.bold}${i + 1}${C.reset} ${x.id}  ${C.dim}${(x.title || x.engine || "").slice(0, 40)} · ${x.engine || "claude"} · ${idade}${C.reset}${flag}${eu}\n`);
+      });
+      const esc = await new Promise((res) => rl.question(`${C.dim}número pra entrar (Enter cancela): ${C.reset}`, res));
+      const alvo = ss[Number(esc.trim()) - 1];
+      if (!alvo || alvo.id === id) return rl.prompt();
+      // Troca = RE-EXEC: o attach carrega stream, readline e fila de aprovação; reaproveitar
+      // esse estado pra outra sessão é fonte garantida de stream duplicado. Processo novo é
+      // barato e limpo; ao sair dele, este também sai (nada empilha na volta).
+      process.stdout.write(`${C.dim}entrando em ${alvo.id}…${C.reset}\n`);
+      rl.close();
+      const rc = spawnSync(process.execPath, [process.argv[1], "attach", alvo.id], { stdio: "inherit" });
+      process.exit(rc.status ?? 0);
     }
     if (t === "/init") {
       // Padrão Claude Code: pede pro próprio agente escrever o arquivo de contexto — ele já
