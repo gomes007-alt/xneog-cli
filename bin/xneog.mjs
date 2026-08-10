@@ -27,7 +27,7 @@ import { execFileSync } from "node:child_process";
 const HOME = homedir();
 const CFG_DIR = `${HOME}/.xneog`;
 const CFG_FILE = `${CFG_DIR}/config.json`;
-const VERSION = "0.9.3";
+const VERSION = "0.9.4";
 
 const C = { dim: "\x1b[2m", reset: "\x1b[0m", cyan: "\x1b[36m", green: "\x1b[32m", yellow: "\x1b[33m", red: "\x1b[31m", bold: "\x1b[1m" };
 
@@ -451,21 +451,30 @@ async function cmdAttach(id) {
   let cmdMenu = [];
   api("/commands").then(r => { cmdMenu = r.json?.menu || []; }).catch(() => {});
   const LOCAL = [
-    { cmd: "/model", desc: "troca o modelo (sonnet|opus|fable|haiku ou claude-*)" },
-    { cmd: "/mode",  desc: "troca o modo (default|acceptEdits|plan|auto)" },
-    { cmd: "/stop",  desc: "cancela o turno atual (a sessão sobrevive)" },
-    { cmd: "/tasks", desc: "subagentes/workflows da sessão (com fases)" },
-    { cmd: '"""',    desc: "abre bloco multiline (fecha com \"\"\" e envia) · ou termine a linha com \\" },
-    { cmd: "/conta", desc: "quem sou: credencial, device e daemon desta sessão" },
-    { cmd: "/login", desc: "/login <código> — conecta este terminal à sua conta (código no web app, botão CLI)" },
-    { cmd: "/q",     desc: "sai (a sessão continua viva no servidor)" },
+    { cmd: "/model",   desc: "troca o modelo (sonnet|opus|fable|haiku)" },
+    { cmd: "/mode",    desc: "troca o modo (default|acceptEdits|plan|auto)" },
+    { cmd: "/compact", desc: "resume o histórico e continua mais leve/barato" },
+    { cmd: "/stop",    desc: "cancela o turno atual (a sessão sobrevive)" },
+    { cmd: "/tasks",   desc: "subagentes/workflows da sessão (com fases)" },
+    { cmd: "/conta",   desc: "quem sou: credencial, device e daemon" },
+    { cmd: "/login",   desc: "conecta este terminal à sua conta (browser)" },
+    { cmd: "/q",       desc: "sai (a sessão continua viva no servidor)" },
   ];
+  // universo de comandos pro autocomplete (locais + os do daemon que vão como mensagem)
+  const todosCmds = () => [...LOCAL, ...cmdMenu.filter(x => x.scope === "both")];
   function printMenu() {
     for (const m of LOCAL) process.stdout.write(`${C.cyan}${m.cmd.padEnd(9)}${C.reset} ${C.dim}${m.desc}${C.reset}\n`);
     for (const m of cmdMenu.filter(x => x.scope === "both")) process.stdout.write(`${C.cyan}${m.cmd.padEnd(9)}${C.reset} ${C.dim}${m.desc} (vai como mensagem)${C.reset}\n`);
   }
 
-  const rl = createInterface({ input: process.stdin, output: process.stdout, prompt: `${C.cyan}❯ ${C.reset}` });
+  // Tab completa comando de "/" (prefixo comum) e, ambíguo, lista as opções — idioma universal
+  // de terminal (bash/openclaude). Só age quando a linha é um "/foo" sem espaço.
+  function completer(line) {
+    if (!line.startsWith("/") || line.includes(" ")) return [[], line];
+    const nomes = todosCmds().map(c => c.cmd).filter(c => c.startsWith(line));
+    return [nomes.length ? nomes : [], line];
+  }
+  const rl = createInterface({ input: process.stdin, output: process.stdout, prompt: `${C.cyan}❯ ${C.reset}`, completer });
   RL = rl;
   rl.on("close", () => process.exit(0));
   // Ctrl-C = reflexo universal de "para isso" → interrompe o TURNO (a sessão vive). 2º Ctrl-C sai.
@@ -477,6 +486,25 @@ async function cmdAttach(id) {
     await api(`/sessions/${id}/interrupt`, { method: "POST" }, true);
     rl.prompt();
   });
+  // Dica ao vivo (padrão Claude Code): conforme digita "/", mostra os comandos que casam numa
+  // linha abaixo do cursor via save/restore de cursor (ESC7/ESC8) — não toca no que você escreveu.
+  // Some quando a linha não é mais um "/foo". Guardado em try: um terminal exótico nunca quebra o input.
+  let dicaAtiva = false;
+  function limpaDica() { if (dicaAtiva) { try { process.stdout.write("\x1b7\n\x1b[2K\x1b8"); } catch {} dicaAtiva = false; } }
+  function redesenhaDica() {
+    try {
+      const l = rl.line || "";
+      if (!l.startsWith("/") || l.includes(" ")) { limpaDica(); return; }
+      const m = todosCmds().filter(c => c.cmd.startsWith(l)).slice(0, 6);
+      if (!m.length) { limpaDica(); return; }
+      const linha = m.map(c => `${C.cyan}${c.cmd}${C.reset}`).join("  ") + `  ${C.dim}${m.length === 1 ? "↹ Tab completa" : "↹ Tab"}${C.reset}`;
+      process.stdout.write(`\x1b7\n\x1b[2K${linha}\x1b8`);
+      dicaAtiva = true;
+    } catch {}
+  }
+  try {
+    process.stdin.on("keypress", () => { if (!ml) setImmediate(redesenhaDica); });
+  } catch {}
   rl.prompt();
   const PROMPT = `${C.cyan}❯ ${C.reset}`, PROMPT_ML = `${C.dim}… ${C.reset}`;
   const send = async (text) => {
@@ -489,6 +517,7 @@ async function cmdAttach(id) {
   // Custo p/ quem digita: 45ms imperceptíveis antes de enviar.
   let burst = [], burstT = null;
   rl.on("line", (raw) => {
+    limpaDica();
     burst.push(raw);
     clearTimeout(burstT);
     burstT = setTimeout(async () => {
