@@ -111,7 +111,11 @@ if st == 200: req(f"{AG}/sessions/{json.loads(body)['id']}/kill", "POST", {}, to
 print("== 7. CLI no box (conta do Gomes)")
 r = subprocess.run(["ssh", "-o", "BatchMode=yes", "Administrator@100.106.183.14", "xneog --version 2>NUL"],
                    capture_output=True, text=True, timeout=60)
-chk("xneog 0.9.0 no box", "0.9.0" in r.stdout)
+# Versão do box == versão do repo: pinar número literal envelhece a cada release (este teste
+# já falhou sozinho por isso). O que importa é que o deploy no box aconteceu.
+vlocal = json.load(open("/Users/erck/Projects/xneog-cli/package.json"))["version"]
+vbox = next((l.strip() for l in r.stdout.splitlines() if l.strip()[:1].isdigit()), "")
+chk(f"CLI do box na versão do repo ({vlocal})", vbox == vlocal, f"box={vbox}")
 r = subprocess.run(["ssh", "-o", "BatchMode=yes", "Administrator@100.106.183.14", "xneog ls 2>NUL"],
                    capture_output=True, text=True, timeout=60)
 chk("xneog ls do box lista só o tenant dele", "leandro.1416.ls.ls" in r.stdout and "teste-e2e" not in r.stdout)
