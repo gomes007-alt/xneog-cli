@@ -20,6 +20,8 @@
 import { createInterface } from "node:readline";
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
+import { createHmac } from "node:crypto";
+import { hostname } from "node:os";
 import { execFileSync } from "node:child_process";
 
 const HOME = homedir();
@@ -49,13 +51,22 @@ function loadConfig() {
   return {
     base: process.env.XNEOG_BRIDGE || cfg.base || "http://127.0.0.1:8802",
     key: process.env.NATIVE_API_KEY || cfg.key || legacy.NATIVE_API_KEY || "",
+    device: cfg.device || null,   // conta xNeog: {id, secret} do device pareado — token v2 por request
   };
 }
 // `xneog ls | head -1` fechava o pipe e o Node cuspia stack trace de EPIPE na cara do usuário
 process.stdout.on("error", (e) => { if (e && e.code === "EPIPE") process.exit(0); });
 
 const CFG = loadConfig();
-const H = { Authorization: `Bearer ${CFG.key}`, "Content-Type": "application/json" };
+function credencial() {
+  if (CFG.device?.id && CFG.device?.secret) {
+    const exp = Date.now() + 10 * 60 * 1000;
+    const mac = createHmac("sha256", CFG.device.secret).update(`${CFG.device.id}.${exp}`).digest("hex");
+    return `Bearer v2.${CFG.device.id}.${exp}.${mac}`;
+  }
+  return `Bearer ${CFG.key}`;
+}
+const H = { get Authorization() { return credencial(); }, "Content-Type": "application/json" };
 const api = async (path, opts = {}, soft = false) => {
   let r;
   // timeout: daemon travado (aceita conexão e não responde) pendurava o comando pra sempre
@@ -78,6 +89,28 @@ function needKey() {
   if (CFG.key) return;
   console.error(`${C.red}sem credencial.${C.reset} rode: ${C.bold}xneog login${C.reset} (ou exporte NATIVE_API_KEY)`);
   process.exit(1);
+}
+
+// ── login de CONTA (padrão Claude Code): código gerado no web app → device pareado no
+// agentd da cloud. Sem key na mão: o secret do device fica no config 0600 e cada request
+// cunha um token v2 de 10min. `xneog login --code XXXX [--base https://agentd.xneog.com]`.
+async function cmdLoginConta(code, baseFlag) {
+  const b = (baseFlag || "https://agentd.xneog.com").replace(/\/$/, "");
+  let r, j;
+  try {
+    r = await fetch(`${b}/pair/claim`, { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code: code.trim().toUpperCase(), name: `cli ${hostname()}`.slice(0, 60) }) });
+    j = await r.json();
+  } catch (e) { console.error(`${C.red}não conectou em ${b} (${e.message})${C.reset}`); process.exit(1); }
+  if (!r.ok || !j.deviceId || !j.secret) {
+    console.error(`${C.red}código recusado${C.reset} — ${j.error || `HTTP ${r.status}`}. Gere outro no web app (expira em 5min, uso único).`);
+    process.exit(1);
+  }
+  mkdirSync(CFG_DIR, { recursive: true, mode: 0o700 });
+  let atual = {}; try { atual = JSON.parse(readFileSync(CFG_FILE, "utf8")); } catch {}
+  writeFileSync(CFG_FILE, JSON.stringify({ ...atual, base: b, device: { id: j.deviceId, secret: j.secret } }, null, 2), { mode: 0o600 });
+  console.log(`${C.green}conectado à sua conta xNeog${C.reset} · device ${j.deviceId} · daemon ${b}`);
+  console.log(`${C.dim}suas sessões: xneog ls · nova: xneog new --engine api · entrar: xneog attach <id>${C.reset}`);
 }
 
 // ── login (BYOK) ─────────────────────────────────────────────────────────────
@@ -629,6 +662,7 @@ const profile = flag("--profile");
 const base = flag("--base");
 const keyFlag = flag("--key");
 const keychain = boolFlag("--keychain");
+const codeFlag = flag("--code");
 const nameFlag = flag("--name");
 const args = argv.slice(1);
 
@@ -648,7 +682,8 @@ async function cmdDefault() {
   return cmdNew(cwd, { title, engine, model, profile });
 }
 
-if (cmd === "login") await cmdLogin(base, keychain, keyFlag);
+if (cmd === "login" && codeFlag) await cmdLoginConta(codeFlag, base);
+else if (cmd === "login") await cmdLogin(base, keychain, keyFlag);
 else if (cmd === "ls") { needKey(); await cmdLs(); }
 else if (cmd === "new") { needKey(); await cmdNew(args[0], { title, engine, model, profile }); }
 else if (cmd === "attach" && args[0]) { needKey(); await cmdAttach(args[0]); }
