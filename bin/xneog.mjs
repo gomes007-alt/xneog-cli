@@ -27,7 +27,7 @@ import { execFileSync } from "node:child_process";
 const HOME = homedir();
 const CFG_DIR = `${HOME}/.xneog`;
 const CFG_FILE = `${CFG_DIR}/config.json`;
-const VERSION = "0.9.2";
+const VERSION = "0.9.3";
 
 const C = { dim: "\x1b[2m", reset: "\x1b[0m", cyan: "\x1b[36m", green: "\x1b[32m", yellow: "\x1b[33m", red: "\x1b[31m", bold: "\x1b[1m" };
 
@@ -708,6 +708,8 @@ ${C.cyan}uso:${C.reset}
   xneog login --code XXXX                 conecta colando o código do web app
   xneog login --keychain | login maquina  credencial de máquina (BYOK) no Keychain
   xneog logout                            remove a credencial deste terminal
+  xneog                                   NOVA sessão limpa (padrão Claude Code)
+  xneog --continue | -c                   retoma a sessão mais recente
   xneog ls                                lista sessões (título de IA, engine, fila)
   xneog new [cwd] [--engine claude|grok|api] [--model M] [--profile safe|edit|auto] [--title T]
   xneog attach <id>                       entra numa sessão (streaming + composer + aprovação)
@@ -751,6 +753,7 @@ const profile = flag("--profile");
 const base = flag("--base");
 const keyFlag = flag("--key");
 const keychain = boolFlag("--keychain");
+const contFlag = boolFlag("--continue") || boolFlag("-c");
 const codeFlag = flag("--code");
 const nameFlag = flag("--name");
 const args = argv.slice(1);
@@ -760,27 +763,25 @@ const args = argv.slice(1);
 async function cmdDefault() {
   needKey();
   const cwd = process.cwd();
-  const r = await api("/sessions");
-  // "viva" de verdade: nem arquivada nem morta — retomar sessão morta dava boot em cima de
-  // "sessão encerrada" (engine api morta não tem resume).
-  const vivas = (r.json?.sessions || [])
-    .filter(s => s.archived !== true && s.status !== "dead")
-    .sort((a, b) => b.lastTs - a.lastTs);
-  // Credencial de CONTA (device): as sessões moram na jaula do tenant no servidor — o cwd
-  // local NUNCA casa. A sessão "deste diretório" vira "a mais recente da conta".
-  const S = CFG.device?.id
-    ? vivas[0]
-    : vivas.filter(s => s.cwd === cwd && (s.engine || "claude") === (engine || s.engine || "claude"))[0];
-  if (S && !engine) {
-    console.log(`${C.dim}retomando sessão ${S.id}${CFG.device?.id ? " da sua conta" : " deste diretório"} (nova: xneog new)${C.reset}`);
-    return cmdAttach(S.id);
+  // Padrão Claude Code: `xneog` puro = sessão NOVA e LIMPA. Retomar é EXPLÍCITO com
+  // --continue (a mais recente) ou attach <id>. Antes o default retomava e despejava o
+  // histórico velho na tela — confuso e caro (todo o contexto antigo volta pro modelo).
+  if (contFlag) {
+    const r = await api("/sessions");
+    const vivas = (r.json?.sessions || [])
+      .filter(s => s.archived !== true && s.status !== "dead")
+      .sort((a, b) => b.lastTs - a.lastTs);
+    const S = CFG.device?.id ? vivas[0]
+      : vivas.filter(s => s.cwd === cwd && (s.engine || "claude") === (engine || s.engine || "claude"))[0];
+    if (S) { console.log(`${C.dim}retomando ${S.id}${CFG.device?.id ? " da sua conta" : ""}${C.reset}`); return cmdAttach(S.id); }
+    console.log(`${C.dim}nenhuma sessão pra retomar — criando uma nova${C.reset}`);
   }
   try { return await cmdNew(cwd, { title, engine, model, profile }); }
   catch (e) {
-    // Teto de sessões do tenant: entrar na mais recente é melhor que um erro seco.
-    if (vivas[0] && /limite de sessões/.test(String(e?.message || e))) {
-      console.log(`${C.dim}teto de sessões — entrando na mais recente (${vivas[0].id}). Encerre com /q + kill no web.${C.reset}`);
-      return cmdAttach(vivas[0].id);
+    if (/limite de sessões/.test(String(e?.message || e))) {
+      const r = await api("/sessions");
+      const viva = (r.json?.sessions || []).filter(s => s.archived !== true && s.status !== "dead").sort((a, b) => b.lastTs - a.lastTs)[0];
+      if (viva) { console.log(`${C.dim}teto de sessões atingido — entrando na mais recente (${viva.id}). Libere com kill no web/app.${C.reset}`); return cmdAttach(viva.id); }
     }
     throw e;
   }
