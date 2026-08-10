@@ -27,7 +27,7 @@ import { execFileSync } from "node:child_process";
 const HOME = homedir();
 const CFG_DIR = `${HOME}/.xneog`;
 const CFG_FILE = `${CFG_DIR}/config.json`;
-const VERSION = "0.9.7";
+const VERSION = "0.9.8";
 
 const C = { dim: "\x1b[2m", reset: "\x1b[0m", cyan: "\x1b[36m", green: "\x1b[32m", yellow: "\x1b[33m", red: "\x1b[31m", bold: "\x1b[1m" };
 
@@ -295,7 +295,9 @@ function renderDiff(inputStr) {
   return any;
 }
 let STATUS = "";   // "engine · modelo" — rodapé direito do turn_end (setado no banner)
+let _limpaDicaHook = null;   // setado pelo attach: evento do stream apaga o menu "/" antes de escrever
 function render(e) {
+  if (_limpaDicaHook) _limpaDicaHook();
   switch (e.kind) {
     // o readline JÁ ecoou o que você digitou aqui — reimprimir dava tudo em dobro. Do app/outro
     // cliente, imprime (é a única forma de ver o que foi mandado de fora).
@@ -303,7 +305,7 @@ function render(e) {
       if (e.via === "terminal") break;
       process.stdout.write(`\n${C.cyan}❯ ${e.text}${C.reset} ${C.dim}(${e.via === "app" ? "do app" : "de outro cliente"})${C.reset}\n`);
       break;
-    case "delta": process.stdout.write(mdStream(e.text || "")); break;
+    case "delta": process.stdout.write(mdStream(e.text || "")); break;   // limpaDica roda no render()
     case "text":  process.stdout.write(mdReset()); break;   // o delta já imprimiu
     case "tool_use": {
       let d = ""; try { const o = JSON.parse(e.input || "{}"); d = o.description || o.file_path || o.command || o.pattern || ""; } catch {}
@@ -532,6 +534,11 @@ async function cmdAttach(id) {
   }
   function redesenhaDica() {
     try {
+      // No RODAPÉ do terminal os \n do menu fazem SCROLL: a posição salva por ESC7 sobe junto e
+      // o ESC8 devolve o cursor pro lugar errado (menu órfão, prompt sobrescrito). Só desenha
+      // quando há linhas livres abaixo — senão, dica de uma linha só (que não rola).
+      const linhasLivres = (process.stdout.rows || 24) - 2;
+      if (linhasLivres < 3) { limpaDica(); return; }
       const l = (rl.line || "").trimStart();
       if (!l.startsWith("/") || l.includes(" ")) { limpaDica(); return; }
       const m = todosCmds().filter(c => c.cmd.startsWith(l)).slice(0, 8);
@@ -545,6 +552,7 @@ async function cmdAttach(id) {
       dicaLinhas = m.length;
     } catch {}
   }
+  _limpaDicaHook = limpaDica;
   try {
     process.stdin.on("keypress", () => { if (!ml) setImmediate(redesenhaDica); });
   } catch {}
