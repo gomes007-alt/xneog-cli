@@ -710,7 +710,11 @@ async function cmdDefault() {
   needKey();
   const cwd = process.cwd();
   const r = await api("/sessions");
-  const vivas = (r.json?.sessions || []).filter(s => s.archived !== true).sort((a, b) => b.lastTs - a.lastTs);
+  // "viva" de verdade: nem arquivada nem morta — retomar sessão morta dava boot em cima de
+  // "sessão encerrada" (engine api morta não tem resume).
+  const vivas = (r.json?.sessions || [])
+    .filter(s => s.archived !== true && s.status !== "dead")
+    .sort((a, b) => b.lastTs - a.lastTs);
   // Credencial de CONTA (device): as sessões moram na jaula do tenant no servidor — o cwd
   // local NUNCA casa. A sessão "deste diretório" vira "a mais recente da conta".
   const S = CFG.device?.id
