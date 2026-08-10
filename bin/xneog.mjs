@@ -27,7 +27,7 @@ import { execFileSync } from "node:child_process";
 const HOME = homedir();
 const CFG_DIR = `${HOME}/.xneog`;
 const CFG_FILE = `${CFG_DIR}/config.json`;
-const VERSION = "0.9.8";
+const VERSION = "0.9.9";
 
 const C = { dim: "\x1b[2m", reset: "\x1b[0m", cyan: "\x1b[36m", green: "\x1b[32m", yellow: "\x1b[33m", red: "\x1b[31m", bold: "\x1b[1m" };
 
@@ -295,6 +295,8 @@ function renderDiff(inputStr) {
   return any;
 }
 let STATUS = "";   // "engine · modelo" — rodapé direito do turn_end (setado no banner)
+// Gasto acumulado DESTA sessão de terminal (o daemon manda usage medido em cada turn_end).
+const GASTO = { turnos: 0, in: 0, out: 0, usd: 0, modelos: new Set() };
 let _limpaDicaHook = null;   // setado pelo attach: evento do stream apaga o menu "/" antes de escrever
 function render(e) {
   if (_limpaDicaHook) _limpaDicaHook();
@@ -371,11 +373,14 @@ function render(e) {
       process.stdout.write(mdReset());
       const rest = e.next ? ` · próxima da fila entrando${e.queued ? ` (${e.queued} atrás)` : ""}` : "";
       if (e.model && e.usage) {   // engine api: número MEDIDO, nunca estimado no cliente
+        GASTO.turnos++; GASTO.in += (e.usage.in || 0) + (e.usage.cacheR || 0) + (e.usage.cacheW || 0); GASTO.out += e.usage.out || 0;
+        GASTO.modelos.add(e.model.replace(/^claude-/, "").replace(/-\d{8}$/, ""));
         const PRECO = { "claude-haiku-4-5": [1, 5], "claude-sonnet-5": [3, 15], "claude-opus-5": [15, 75], "claude-fable-5": [20, 100] };
         const b = Object.keys(PRECO).find((k) => e.model.startsWith(k));
         const u = e.usage, inTot = (u.in || 0) + (u.cacheR || 0) + (u.cacheW || 0);
         const custo = b ? ((u.in || 0) * PRECO[b][0] + (u.cacheW || 0) * PRECO[b][0] * 1.25 + (u.cacheR || 0) * PRECO[b][0] * 0.1 + (u.out || 0) * PRECO[b][1]) / 1e6 : null;
         const kf = (n) => n >= 1000 ? (n / 1000).toFixed(1) + "k" : String(n);
+        if (custo != null) GASTO.usd += custo;
         STATUS = `api · ${e.model.replace(/^claude-/, "").replace(/-\d{8}$/, "")} · ${kf(inTot)}/${kf(u.out || 0)}${custo != null ? ` · $${custo.toFixed(4)}` : ""}`;
       }
       const left = `— turno concluído${e.durationMs ? ` em ${Math.round(e.durationMs / 1000)}s` : ""}${rest}`;
@@ -490,6 +495,7 @@ async function cmdAttach(id) {
     { cmd: "/compact", desc: "resume o histórico e continua mais leve/barato" },
     { cmd: "/stop",    desc: "cancela o turno atual (a sessão sobrevive)" },
     { cmd: "/tasks",   desc: "subagentes/workflows da sessão (com fases)" },
+    { cmd: "/cost",    desc: "gasto acumulado desta sessão (tokens e US$)" },
     { cmd: "/conta",   desc: "quem sou: credencial, device e daemon" },
     { cmd: "/login",   desc: "conecta este terminal à sua conta (browser)" },
     { cmd: "/q",       desc: "sai (a sessão continua viva no servidor)" },
@@ -625,6 +631,12 @@ async function cmdAttach(id) {
       if (r.status !== 200) console.error(`${C.red}${r.text}${C.reset}`);
       return rl.prompt();
     }
+    if (t === "/cost") {
+      const kf = (n) => n >= 1000 ? (n / 1000).toFixed(1) + "k" : String(n);
+      if (!GASTO.turnos) process.stdout.write(`${C.dim}nenhum turno medido nesta sessão de terminal ainda${C.reset}\n`);
+      else process.stdout.write(`${C.bold}${GASTO.turnos} turno${GASTO.turnos > 1 ? "s" : ""}${C.reset} · ${kf(GASTO.in)} in / ${kf(GASTO.out)} out · ${C.bold}$${GASTO.usd.toFixed(4)}${C.reset} ${C.dim}(${[...GASTO.modelos].join(", ")} · só o que este terminal viu)${C.reset}\n`);
+      return rl.prompt();
+    }
     if (t === "/conta") {
       const quem = CFG.device?.id ? `conta xNeog · device ${CFG.device.id}` : "key de máquina (BYOK)";
       process.stdout.write(`${C.dim}${quem} · daemon ${CFG.base}${C.reset}\n`);
@@ -751,9 +763,11 @@ async function cmdDoctor() {
   const linha = (ok, txt, extra = "") => console.log(`${ok ? C.green + "✔" : C.red + "✘"}${C.reset} ${txt}${extra ? ` ${C.dim}${extra}${C.reset}` : ""}`);
   console.log(`${C.bold}xneog doctor${C.reset} ${C.dim}v${VERSION}${C.reset}\n`);
   // credencial: de onde veio
-  const origem = process.env.NATIVE_API_KEY ? "variável de ambiente"
+  const origem = CFG.device?.id ? `conta xNeog · device ${CFG.device.id}`
+    : process.env.NATIVE_API_KEY ? "variável de ambiente"
     : (() => { try { return JSON.parse(readFileSync(CFG_FILE, "utf8")).key === "@keychain" ? "Keychain (xneog-cli)" : "~/.xneog/config.json"; } catch { return "~/.xneog/env (host)"; } })();
-  linha(!!CFG.key, `credencial: ${CFG.key ? origem : "AUSENTE — rode xneog login"}`);
+  const temCred = !!(CFG.key || CFG.device?.id);
+  linha(temCred, `credencial: ${temCred ? origem : "AUSENTE — rode xneog login"}`);
   linha(true, `daemon configurado: ${CFG.base}`);
   // alcance + protocolo
   let meta = null;
