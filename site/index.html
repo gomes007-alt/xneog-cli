@@ -108,7 +108,13 @@
       <code id="cmd">curl -fsSL https://cli.xneog.com/install.sh | sh</code>
       <button onclick="navigator.clipboard.writeText(document.getElementById('cmd').textContent).then(()=>{this.textContent='copied';setTimeout(()=>this.textContent='copy',1200)})">copy</button>
     </div>
-    <p class="altinstall">or with Node ≥ 20: <code>npm install -g github:gomes007-alt/xneog-cli</code> · macOS today, Linux next</p>
+    <p class="altinstall">or with Node ≥ 20: <code>npm install -g github:gomes007-alt/xneog-cli</code> · macOS · Linux · Windows</p>
+    <div class="install" style="margin-top:14px">
+      <code id="cmd2">xneog login --code YOUR-CODE --base https://agentd.xneog.com</code>
+      <button onclick="navigator.clipboard.writeText(document.getElementById('cmd2').textContent).then(()=>{this.textContent='copied';setTimeout(()=>this.textContent='copy',1200)})">copy</button>
+    </div>
+    <p class="altinstall"><b>Sign in to your account:</b> log in at <a href="https://web.xneog.com/app" style="color:inherit">web.xneog.com</a> (Google or Apple),
+    tap <b>CLI</b>, and paste the one-time code above. Your terminal, phone and web now drive the <b>same sessions</b> — cloud-hosted, cost-metered per turn.</p>
   </header>
 
   <div class="term">
