@@ -59,7 +59,7 @@ process.stdout.on("error", (e) => { if (e && e.code === "EPIPE") process.exit(0)
 
 // cmd.exe nasce em codepage 437 e o logo/❯ viram mojibake — o chcp muda o CP do console
 // COMPARTILHADO, então rodar como filho conserta o pai. Silencioso e inofensivo fora do Windows.
-if (process.platform === "win32") { try { execFileSync("chcp", ["65001"], { stdio: "ignore", shell: true }); } catch {} }
+if (process.platform === "win32") { try { execFileSync("chcp 65001", { stdio: "ignore", shell: true }); } catch {} }
 const CFG = loadConfig();
 function credencial() {
   if (CFG.device?.id && CFG.device?.secret) {
@@ -196,7 +196,10 @@ async function cmdNew(cwd, { title, engine, model, profile }) {
   if (model) body.model = model;
   if (profile) body.permissionMode = PROFILES[profile];
   const r = await api("/sessions", { method: "POST", body: JSON.stringify(body) });
-  if (r.status !== 200) return console.error("falhou:", r.text);
+  if (r.status !== 200) {
+    if (r.status === 429 && /limite de sess/.test(r.text || "")) throw new Error(r.text);
+    return console.error("falhou:", r.text);
+  }
   const eng = r.json.engine && r.json.engine !== "claude" ? ` ${C.yellow}[${r.json.engine}]${C.reset}` : "";
   console.log(`${C.green}sessão ${r.json.id}${C.reset}${eng} em ${r.json.cwd}`);
   await cmdAttach(r.json.id);
@@ -707,14 +710,25 @@ async function cmdDefault() {
   needKey();
   const cwd = process.cwd();
   const r = await api("/sessions");
-  const S = (r.json?.sessions || [])
-    .filter(s => s.cwd === cwd && s.archived !== true && (s.engine || "claude") === (engine || s.engine || "claude"))
-    .sort((a, b) => b.lastTs - a.lastTs)[0];
+  const vivas = (r.json?.sessions || []).filter(s => s.archived !== true).sort((a, b) => b.lastTs - a.lastTs);
+  // Credencial de CONTA (device): as sessões moram na jaula do tenant no servidor — o cwd
+  // local NUNCA casa. A sessão "deste diretório" vira "a mais recente da conta".
+  const S = CFG.device?.id
+    ? vivas[0]
+    : vivas.filter(s => s.cwd === cwd && (s.engine || "claude") === (engine || s.engine || "claude"))[0];
   if (S && !engine) {
-    console.log(`${C.dim}retomando sessão ${S.id} deste diretório (nova: xneog new)${C.reset}`);
+    console.log(`${C.dim}retomando sessão ${S.id}${CFG.device?.id ? " da sua conta" : " deste diretório"} (nova: xneog new)${C.reset}`);
     return cmdAttach(S.id);
   }
-  return cmdNew(cwd, { title, engine, model, profile });
+  try { return await cmdNew(cwd, { title, engine, model, profile }); }
+  catch (e) {
+    // Teto de sessões do tenant: entrar na mais recente é melhor que um erro seco.
+    if (vivas[0] && /limite de sessões/.test(String(e?.message || e))) {
+      console.log(`${C.dim}teto de sessões — entrando na mais recente (${vivas[0].id}). Encerre com /q + kill no web.${C.reset}`);
+      return cmdAttach(vivas[0].id);
+    }
+    throw e;
+  }
 }
 
 if (cmd === "login" && codeFlag) await cmdLoginConta(codeFlag, base);
