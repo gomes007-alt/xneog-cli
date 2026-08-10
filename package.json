@@ -1,6 +1,6 @@
 {
   "name": "@xneog/cli",
-  "version": "0.9.1",
+  "version": "0.9.2",
   "description": "xNeog CLI — cliente de terminal do xneog-agentd (sessões agentic multi-engine: Claude, Grok em jaula, Claude API)",
   "type": "module",
   "bin": {

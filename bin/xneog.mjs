@@ -18,7 +18,7 @@
  *   de aprovação é a razão da ponte existir (doutrina, enforce server-side).
  */
 import { createInterface } from "node:readline";
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync, unlinkSync } from "node:fs";
 import { homedir } from "node:os";
 import { createHmac } from "node:crypto";
 import { hostname } from "node:os";
@@ -27,7 +27,7 @@ import { execFileSync } from "node:child_process";
 const HOME = homedir();
 const CFG_DIR = `${HOME}/.xneog`;
 const CFG_FILE = `${CFG_DIR}/config.json`;
-const VERSION = "0.9.1";
+const VERSION = "0.9.2";
 
 const C = { dim: "\x1b[2m", reset: "\x1b[0m", cyan: "\x1b[36m", green: "\x1b[32m", yellow: "\x1b[33m", red: "\x1b[31m", bold: "\x1b[1m" };
 
@@ -98,6 +98,10 @@ function needKey() {
 // (Google/Apple) e o terminal recebe a credencial SOZINHO por polling — zero copy-paste.
 // Fallbacks: `--code XXXX` (colar código do web) · `--key/--keychain` ou `login maquina` (BYOK).
 async function cmdLoginBrowser(baseFlag) {
+  if (CFG.device?.id) {
+    const quem = CFG.device.id;
+    console.log(`${C.dim}já conectado (device ${quem}). Vou reconectar — a credencial atual será substituída.${C.reset}`);
+  }
   const BFF = process.env.XNEOG_CONTA_BASE || "https://web.xneog.com";
   let st;
   try {
@@ -700,7 +704,10 @@ function help() {
   console.log(`${C.bold}xneog${C.reset} v${VERSION} ${C.dim}— cliente do xneog-agentd (protocolo v1)${C.reset}
 
 ${C.cyan}uso:${C.reset}
-  xneog login [--base URL] [--key K] [--keychain]   configura credencial (BYOK; valida antes de gravar)
+  xneog login                             conecta à sua CONTA pelo browser (padrão Claude Code)
+  xneog login --code XXXX                 conecta colando o código do web app
+  xneog login --keychain | login maquina  credencial de máquina (BYOK) no Keychain
+  xneog logout                            remove a credencial deste terminal
   xneog ls                                lista sessões (título de IA, engine, fila)
   xneog new [cwd] [--engine claude|grok|api] [--model M] [--profile safe|edit|auto] [--title T]
   xneog attach <id>                       entra numa sessão (streaming + composer + aprovação)
@@ -779,7 +786,13 @@ async function cmdDefault() {
   }
 }
 
-if (cmd === "login" && codeFlag) await cmdLoginConta(codeFlag, base);
+function cmdLogout() {
+  try { unlinkSync(CFG_FILE); } catch {}
+  try { execFileSync("security", ["delete-generic-password", "-a", "xneog", "-s", "xneog-cli"], { stdio: "ignore" }); } catch {}
+  console.log(`${C.green}deslogado${C.reset} — credencial removida. Reconecte com ${C.bold}xneog login${C.reset}.`);
+}
+if (cmd === "logout" || cmd === "sair") cmdLogout();
+else if (cmd === "login" && codeFlag) await cmdLoginConta(codeFlag, base);
 else if (cmd === "login" && (keyFlag || keychain)) await cmdLogin(base, keychain, keyFlag);
 else if (cmd === "login" && args[0] === "maquina") await cmdLogin(base, keychain, keyFlag);
 else if (cmd === "login") await cmdLoginBrowser(base).catch((e) => { console.error(`${C.red}${e.message}${C.reset}`); process.exit(1); });
