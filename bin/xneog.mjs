@@ -27,7 +27,7 @@ import { execFileSync } from "node:child_process";
 const HOME = homedir();
 const CFG_DIR = `${HOME}/.xneog`;
 const CFG_FILE = `${CFG_DIR}/config.json`;
-const VERSION = "0.9.4";
+const VERSION = "0.9.5";
 
 const C = { dim: "\x1b[2m", reset: "\x1b[0m", cyan: "\x1b[36m", green: "\x1b[32m", yellow: "\x1b[33m", red: "\x1b[31m", bold: "\x1b[1m" };
 
@@ -461,7 +461,7 @@ async function cmdAttach(id) {
     { cmd: "/q",       desc: "sai (a sessão continua viva no servidor)" },
   ];
   // universo de comandos pro autocomplete (locais + os do daemon que vão como mensagem)
-  const todosCmds = () => [...LOCAL, ...cmdMenu.filter(x => x.scope === "both")];
+  const todosCmds = () => [...LOCAL, ...cmdMenu.filter(x => x.scope === "both").map(x => ({ cmd: x.cmd, desc: (x.desc || "").slice(0, 46) }))];
   function printMenu() {
     for (const m of LOCAL) process.stdout.write(`${C.cyan}${m.cmd.padEnd(9)}${C.reset} ${C.dim}${m.desc}${C.reset}\n`);
     for (const m of cmdMenu.filter(x => x.scope === "both")) process.stdout.write(`${C.cyan}${m.cmd.padEnd(9)}${C.reset} ${C.dim}${m.desc} (vai como mensagem)${C.reset}\n`);
@@ -489,17 +489,28 @@ async function cmdAttach(id) {
   // Dica ao vivo (padrão Claude Code): conforme digita "/", mostra os comandos que casam numa
   // linha abaixo do cursor via save/restore de cursor (ESC7/ESC8) — não toca no que você escreveu.
   // Some quando a linha não é mais um "/foo". Guardado em try: um terminal exótico nunca quebra o input.
-  let dicaAtiva = false;
-  function limpaDica() { if (dicaAtiva) { try { process.stdout.write("\x1b7\n\x1b[2K\x1b8"); } catch {} dicaAtiva = false; } }
+  // Menu de "/" ao vivo (padrão Claude Code): duas colunas — comando (ciano) + descrição (dim) —
+  // desenhadas ABAIXO do cursor via save/restore (ESC7/ESC8), filtrando a cada tecla. Abaixo em
+  // vez de acima porque em readline cru é o único lado seguro (não briga com o redraw do input).
+  let dicaLinhas = 0;
+  function limpaDica() {
+    if (!dicaLinhas) return;
+    try { let out = "\x1b7"; for (let i = 0; i < dicaLinhas; i++) out += "\n\x1b[2K"; out += "\x1b8"; process.stdout.write(out); } catch {}
+    dicaLinhas = 0;
+  }
   function redesenhaDica() {
     try {
-      const l = rl.line || "";
+      const l = (rl.line || "").trimStart();
       if (!l.startsWith("/") || l.includes(" ")) { limpaDica(); return; }
-      const m = todosCmds().filter(c => c.cmd.startsWith(l)).slice(0, 6);
-      if (!m.length) { limpaDica(); return; }
-      const linha = m.map(c => `${C.cyan}${c.cmd}${C.reset}`).join("  ") + `  ${C.dim}${m.length === 1 ? "↹ Tab completa" : "↹ Tab"}${C.reset}`;
-      process.stdout.write(`\x1b7\n\x1b[2K${linha}\x1b8`);
-      dicaAtiva = true;
+      const m = todosCmds().filter(c => c.cmd.startsWith(l)).slice(0, 8);
+      limpaDica();
+      if (!m.length) return;
+      const w = Math.max(...m.map(c => c.cmd.length));
+      let out = "\x1b7";
+      for (const c of m) out += `\n\x1b[2K  ${C.cyan}${c.cmd.padEnd(w)}${C.reset}  ${C.dim}${c.desc || ""}${C.reset}`;
+      out += "\x1b8";
+      process.stdout.write(out);
+      dicaLinhas = m.length;
     } catch {}
   }
   try {
