@@ -27,7 +27,7 @@ import { execFileSync } from "node:child_process";
 const HOME = homedir();
 const CFG_DIR = `${HOME}/.xneog`;
 const CFG_FILE = `${CFG_DIR}/config.json`;
-const VERSION = "0.8.0";
+const VERSION = "0.9.0";
 
 const C = { dim: "\x1b[2m", reset: "\x1b[0m", cyan: "\x1b[36m", green: "\x1b[32m", yellow: "\x1b[33m", red: "\x1b[31m", bold: "\x1b[1m" };
 
@@ -57,6 +57,9 @@ function loadConfig() {
 // `xneog ls | head -1` fechava o pipe e o Node cuspia stack trace de EPIPE na cara do usuário
 process.stdout.on("error", (e) => { if (e && e.code === "EPIPE") process.exit(0); });
 
+// cmd.exe nasce em codepage 437 e o logo/❯ viram mojibake — o chcp muda o CP do console
+// COMPARTILHADO, então rodar como filho conserta o pai. Silencioso e inofensivo fora do Windows.
+if (process.platform === "win32") { try { execFileSync("chcp", ["65001"], { stdio: "ignore", shell: true }); } catch {} }
 const CFG = loadConfig();
 function credencial() {
   if (CFG.device?.id && CFG.device?.secret) {
@@ -287,6 +290,14 @@ function render(e) {
       break;
     case "turn_end": {
       const rest = e.next ? ` · próxima da fila entrando${e.queued ? ` (${e.queued} atrás)` : ""}` : "";
+      if (e.model && e.usage) {   // engine api: número MEDIDO, nunca estimado no cliente
+        const PRECO = { "claude-haiku-4-5": [1, 5], "claude-sonnet-5": [3, 15], "claude-opus-5": [15, 75], "claude-fable-5": [20, 100] };
+        const b = Object.keys(PRECO).find((k) => e.model.startsWith(k));
+        const u = e.usage, inTot = (u.in || 0) + (u.cacheR || 0) + (u.cacheW || 0);
+        const custo = b ? ((u.in || 0) * PRECO[b][0] + (u.cacheW || 0) * PRECO[b][0] * 1.25 + (u.cacheR || 0) * PRECO[b][0] * 0.1 + (u.out || 0) * PRECO[b][1]) / 1e6 : null;
+        const kf = (n) => n >= 1000 ? (n / 1000).toFixed(1) + "k" : String(n);
+        STATUS = `api · ${e.model.replace(/^claude-/, "").replace(/-\d{8}$/, "")} · ${kf(inTot)}/${kf(u.out || 0)}${custo != null ? ` · $${custo.toFixed(4)}` : ""}`;
+      }
       const left = `— turno concluído${e.durationMs ? ` em ${Math.round(e.durationMs / 1000)}s` : ""}${rest}`;
       const pad = Math.max(1, cols() - left.length - STATUS.length - 1);
       process.stdout.write(`\n${C.dim}${left}${" ".repeat(pad)}${STATUS}${C.reset}\n${e.next ? "" : `${C.cyan}❯ ${C.reset}`}`);
@@ -399,7 +410,9 @@ async function cmdAttach(id) {
     { cmd: "/stop",  desc: "cancela o turno atual (a sessão sobrevive)" },
     { cmd: "/tasks", desc: "subagentes/workflows da sessão (com fases)" },
     { cmd: '"""',    desc: "abre bloco multiline (fecha com \"\"\" e envia) · ou termine a linha com \\" },
-    { cmd: "/q",     desc: "sai (a sessão continua no Mac)" },
+    { cmd: "/conta", desc: "quem sou: credencial, device e daemon desta sessão" },
+    { cmd: "/login", desc: "/login <código> — conecta este terminal à sua conta (código no web app, botão CLI)" },
+    { cmd: "/q",     desc: "sai (a sessão continua viva no servidor)" },
   ];
   function printMenu() {
     for (const m of LOCAL) process.stdout.write(`${C.cyan}${m.cmd.padEnd(9)}${C.reset} ${C.dim}${m.desc}${C.reset}\n`);
@@ -484,6 +497,28 @@ async function cmdAttach(id) {
       if (!m) { process.stdout.write(`${C.dim}uso: /mode default|acceptEdits|plan|auto${C.reset}\n`); return rl.prompt(); }
       const r = await api(`/sessions/${id}/mode`, { method: "POST", body: JSON.stringify({ mode: m }) }, true);
       if (r.status !== 200) console.error(`${C.red}${r.text}${C.reset}`);
+      return rl.prompt();
+    }
+    if (t === "/conta") {
+      const quem = CFG.device?.id ? `conta xNeog · device ${CFG.device.id}` : "key de máquina (BYOK)";
+      process.stdout.write(`${C.dim}${quem} · daemon ${CFG.base}${C.reset}\n`);
+      return rl.prompt();
+    }
+    if (t.startsWith("/login")) {
+      const code = t.split(/\s+/)[1] || "";
+      if (!code) { process.stdout.write(`${C.dim}uso: /login <código> — gere no web app (botão CLI). Troca a credencial deste terminal.${C.reset}\n`); return rl.prompt(); }
+      try {
+        const b = (CFG.base.startsWith("http://127.") ? "https://agentd.xneog.com" : CFG.base).replace(/\/$/, "");
+        const r = await fetch(`${b}/pair/claim`, { method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ code: code.toUpperCase(), name: `cli ${hostname()}`.slice(0, 60) }) });
+        const j = await r.json();
+        if (!r.ok || !j.deviceId || !j.secret) throw new Error(j.error || `HTTP ${r.status}`);
+        let atual = {}; try { atual = JSON.parse(readFileSync(CFG_FILE, "utf8")); } catch {}
+        mkdirSync(CFG_DIR, { recursive: true, mode: 0o700 });
+        writeFileSync(CFG_FILE, JSON.stringify({ ...atual, base: b, device: { id: j.deviceId, secret: j.secret } }, null, 2), { mode: 0o600 });
+        CFG.base = b; CFG.device = { id: j.deviceId, secret: j.secret };
+        process.stdout.write(`${C.green}conectado à sua conta${C.reset} · device ${j.deviceId} — sessões sincronizadas com o web/app\n`);
+      } catch (e2) { process.stdout.write(`${C.red}não deu: ${e2.message}${C.reset} (código expira em 5min, uso único)\n`); }
       return rl.prompt();
     }
     if (t === "/stop") { await api(`/sessions/${id}/interrupt`, { method: "POST" }, true); return rl.prompt(); }
